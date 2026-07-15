@@ -38,7 +38,8 @@ extern "C" {
  * ============================================================ */
 
 /* 你的 Cloudflare Worker 地址（部署后修改这里！） */
-#define UPLOAD_SERVER_URL       "https://fall-api.haojiale1129.workers.dev"
+// 改为 Worker 地址
+#define UPLOAD_SERVER_URL       "https://api.lele1129.top"
 #define UPLOAD_SERVER_PATH      "/api/fall"
 #define UPLOAD_SERVER_PORT      443
 

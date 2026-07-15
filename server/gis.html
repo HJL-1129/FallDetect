@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>跌倒检测GIS地图</title>
+    <!-- Leaflet CSS (开源免费地图库) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        
+        #header {
+            background: linear-gradient(135deg, #1a237e, #283593);
+            color: white;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            position: relative;
+            z-index: 1000;
+        }
+        #header h1 { font-size: 20px; font-weight: 600; }
+        #header .subtitle { font-size: 13px; opacity: 0.8; margin-top: 2px; }
+        #header .badge {
+            background: #ff5252;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 500;
+        }
+        #header .controls { display: flex; align-items: center; gap: 12px; }
+        #header button {
+            background: rgba(255,255,255,0.15);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.3);
+            padding: 6px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: background 0.2s;
+        }
+        #header button:hover { background: rgba(255,255,255,0.25); }
+        #header .status-dot {
+            display: inline-block;
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+        .status-dot.online { background: #4caf50; }
+        .status-dot.offline { background: #ff5252; }
+
+        #map {
+            height: calc(100vh - 56px);
+            width: 100%;
+        }
+
+        /* 自定义弹出框样式 */
+        .fall-popup .leaflet-popup-content-wrapper {
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+        }
+        .fall-popup .leaflet-popup-content {
+            margin: 12px 16px;
+            min-width: 220px;
+        }
+        .fall-popup h3 {
+            color: #d32f2f;
+            font-size: 16px;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .fall-popup h3::before {
+            content: "⚠";
+            font-size: 18px;
+        }
+        .fall-popup table { width: 100%; border-collapse: collapse; }
+        .fall-popup td {
+            padding: 4px 0;
+            font-size: 13px;
+            color: #333;
+        }
+        .fall-popup td:first-child {
+            color: #666;
+            width: 70px;
+            padding-right: 8px;
+        }
+        .fall-popup .tag {
+            display: inline-block;
+            background: #ffebee;
+            color: #d32f2f;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        /* 自定义标记图标样式 - 使用CSS */
+        .fall-marker-icon {
+            background: #ff5252;
+            border: 3px solid white;
+            border-radius: 50%;
+            box-shadow: 0 2px 8px rgba(255,82,82,0.4);
+            width: 16px !important;
+            height: 16px !important;
+            margin-left: -8px !important;
+            margin-top: -8px !important;
+        }
+        .fall-marker-icon.pulse {
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(255,82,82,0.7); }
+            70% { box-shadow: 0 0 0 12px rgba(255,82,82,0); }
+            100% { box-shadow: 0 0 0 0 rgba(255,82,82,0); }
+        }
+
+        /* 全屏按钮 */
+        #fullscreen-btn {
+            position: absolute;
+            bottom: 24px;
+            right: 24px;
+            z-index: 1000;
+            background: white;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            cursor: pointer;
+            font-size: 13px;
+        }
+        #fullscreen-btn:hover { background: #f5f5f5; }
+
+        /* 信息面板 */
+        #info-panel {
+            position: absolute;
+            bottom: 24px;
+            left: 24px;
+            z-index: 1000;
+            background: white;
+            border-radius: 8px;
+            padding: 12px 16px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+            font-size: 13px;
+            max-width: 240px;
+            display: none;
+        }
+        #info-panel .title { font-weight: 600; color: #333; margin-bottom: 4px; }
+        #info-panel .detail { color: #666; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <div>
+            <h1>🚨 跌倒检测 GIS 地图</h1>
+            <div class="subtitle">WGS84坐标系 · 实时监控</div>
+        </div>
+        <div class="controls">
+            <span id="status-indicator">
+                <span class="status-dot offline" id="status-dot"></span>
+                <span id="status-text">检查连接中...</span>
+            </span>
+            <span class="badge" id="record-count">0 条记录</span>
+            <button onclick="refreshData()">🔄 刷新</button>
+        </div>
+    </div>
+    <div id="map"></div>
+    <div id="info-panel">
+        <div class="title">📊 数据统计</div>
+        <div class="detail" id="stats-detail"></div>
+    </div>
+    <button id="fullscreen-btn" onclick="toggleFullscreen()">⛶ 全屏</button>
+
+    <script>
+        // ============================ 初始化地图 ============================
+        
+        const map = L.map('map', {
+            center: [39.9042, 116.4074],   // 默认北京
+            zoom: 13,
+            zoomControl: true
+        });
+
+        // 使用OpenStreetMap免费瓦片（无API key要求）
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors',
+            maxZoom: 19
+        }).addTo(map);
+
+        // ============================ 自定义标记 ============================
+
+        const fallIcon = L.divIcon({
+            className: 'fall-marker-icon pulse',
+            iconSize: [16, 16],
+            iconAnchor: [8, 8]
+        });
+
+        const markers = [];  // 保存所有标记
+
+        // ============================ 加载数据 ============================
+
+        // ====== 修改这里：API地址指向Cloudflare Worker ======
+        // 部署Worker后，把下面的URL改为你的Worker地址
+        const API_BASE = 'https://api.lele1129.top';
+
+        async function refreshData() {
+            const statusDot = document.getElementById('status-dot');
+            const statusText = document.getElementById('status-text');
+            const recordCount = document.getElementById('record-count');
+
+            try {
+                statusDot.className = 'status-dot offline';
+                statusText.textContent = '加载中...';
+
+                const response = await fetch(API_BASE + '/api/fall');
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                
+                const records = await response.json();
+                
+                // 更新状态
+                statusDot.className = 'status-dot online';
+                statusText.textContent = '已连接';
+                recordCount.textContent = records.length + ' 条记录';
+
+                // 清除旧标记
+                markers.forEach(m => map.removeLayer(m));
+                markers.length = 0;
+
+                // 如果没有数据，显示提示
+                if (records.length === 0) {
+                    document.getElementById('stats-detail').textContent = '暂无跌倒记录';
+                    document.getElementById('info-panel').style.display = 'block';
+                    return;
+                }
+
+                // 添加新标记
+                let bounds = [];
+                records.forEach((record, index) => {
+                    const lat = parseFloat(record.lat);
+                    const lng = parseFloat(record.lng);
+                    
+                    if (isNaN(lat) || isNaN(lng) || (lat === 0 && lng === 0)) return;
+
+                    const marker = L.marker([lat, lng], { icon: fallIcon })
+                        .addTo(map)
+                        .bindPopup(`
+                            <div class="fall-popup">
+                                <h3>跌倒报警</h3>
+                                <table>
+                                    <tr><td>设备:</td><td>${record.device_id || '未知'}</td></tr>
+                                    <tr><td>时间:</td><td>${record.time || '未知'}</td></tr>
+                                    <tr><td>坐标:</td><td>${lat.toFixed(6)}, ${lng.toFixed(6)}</td></tr>
+                                    <tr><td>倾斜角:</td><td>${record.angle ? record.angle.toFixed(1) + '°' : '-'}</td></tr>
+                                    <tr><td>加速度:</td><td>${record.acceleration ? record.acceleration.toFixed(2) + 'g' : '-'}</td></tr>
+                                    <tr><td>状态:</td><td><span class="tag">跌倒报警</span></td></tr>
+                                </table>
+                            </div>
+                        `, { className: 'fall-popup' });
+
+                    markers.push(marker);
+                    bounds.push([lat, lng]);
+
+                    // 最新的一条自动弹出
+                    if (index === records.length - 1) {
+                        marker.openPopup();
+                    }
+                });
+
+                // 自动调整地图视野
+                if (bounds.length > 0) {
+                    if (bounds.length === 1) {
+                        map.setView(bounds[0], 15);
+                    } else {
+                        map.fitBounds(bounds, { padding: [50, 50] });
+                    }
+                }
+
+                // 更新统计信息
+                const now = new Date();
+                const lastHour = records.filter(r => {
+                    const t = new Date(r.time);
+                    return (now - t) < 3600000;
+                }).length;
+                document.getElementById('stats-detail').textContent = 
+                    `总计: ${records.length} 次跌倒 · 最近1小时: ${lastHour} 次`;
+
+            } catch (err) {
+                console.error('Failed to load data:', err);
+                statusDot.className = 'status-dot offline';
+                statusText.textContent = '连接失败';
+                document.getElementById('stats-detail').textContent = '无法连接服务器: ' + err.message;
+            }
+
+            document.getElementById('info-panel').style.display = 'block';
+        }
+
+        // ============================ 全屏切换 ============================
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen();
+            } else {
+                document.exitFullscreen();
+            }
+        }
+
+        // ============================ 自动刷新 ============================
+
+        // 每30秒自动刷新
+        setInterval(refreshData, 30000);
+
+        // 页面加载时立即加载数据
+        window.addEventListener('load', () => {
+            setTimeout(refreshData, 500);
+        });
+    </script>
+</body>
+</html>
