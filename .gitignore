@@ -1,0 +1,30 @@
+# Build output
+build/
+
+# Managed components (auto-downloaded by ESP-IDF)
+managed_components/
+
+# Logs
+log.txt
+log1.txt
+log2.txt
+
+# ESP-IDF config
+sdkconfig
+sdkconfig.old
+sdkconfig.defaults
+
+# IDE
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Server (独立仓库, 单独管理)
+server/.git/

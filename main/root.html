@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>配置中心</title>
+    <style>
+        :root {
+            --primary-color: #4a6bdf;
+            --secondary-color: #6c757d;
+            --success-color: #28a745;
+            --danger-color: #dc3545;
+            --light-color: #f8f9fa;
+            --dark-color: #343a40;
+            --border-radius: 8px;
+            --box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            --transition: all 0.3s ease;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        }
+
+        body {
+            background-color: #f5f7fa;
+            color: #333;
+            line-height: 1.6;
+            padding: 20px;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 600px;
+            margin: 0 auto;
+            background: white;
+            border-radius: var(--border-radius);
+            box-shadow: var(--box-shadow);
+            padding: 30px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+            animation: fadeIn 0.5s ease;
+        }
+
+        h1 {
+            color: var(--primary-color);
+            font-size: 28px;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+
+        .subtitle {
+            color: var(--secondary-color);
+            font-size: 16px;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+            animation: fadeIn 0.5s ease;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 10px;
+            font-weight: 500;
+            color: #495057;
+            font-size: 15px;
+        }
+
+        select,
+        input {
+            width: 100%;
+            padding: 15px;
+            border: 1px solid #ced4da;
+            border-radius: var(--border-radius);
+            font-size: 16px;
+            transition: var(--transition);
+            background-color: #f8f9fa;
+        }
+
+        select:focus,
+        input:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(74, 107, 223, 0.1);
+            background-color: white;
+        }        
+
+        .manual-input-container {
+            margin-top: 15px;
+            animation: fadeIn 0.5s ease;
+        }
+
+        .manual-input-container.show {
+            display: block;
+        }
+
+        .toggle-manual-btn {
+            display: block;
+            text-align: center;
+            margin-top: 10px;
+            color: var(--primary-color);
+            cursor: pointer;
+            font-size: 14px;
+            transition: var(--transition);
+        }
+
+        .toggle-manual-btn:hover {
+            color: #3a57c0;
+            text-decoration: underline;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #e9ecef;
+            color: var(--secondary-color);
+            font-size: 14px;
+            animation: fadeIn 0.5s ease;
+        }
+
+        .footer-link {
+            color: var(--primary-color);
+            text-decoration: none;
+            transition: var(--transition);
+        }
+
+        .footer-link:hover {
+            text-decoration: underline;
+            color: #3a57c0;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .btn-block {
+            width: 100%;
+            padding: 16px;
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: var(--border-radius);
+            font-size: 17px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--transition);
+            text-align: center;
+            margin-top: 20px;
+            box-shadow: 0 4px 10px rgba(74, 107, 223, 0.3);
+        }
+
+        .btn-block:hover {
+            background-color: #3a57c0;
+            transform: translateY(-2px);
+            box-shadow: 0 8px 15px rgba(74, 107, 223, 0.4);
+        }
+
+        .btn-block:hover::before {
+            left: 100%;
+        }
+
+        .btn-block:active {
+            transform: translateY(0) scale(0.98);
+            box-shadow: 0 2px 5px rgba(74, 107, 223, 0.3);
+            background-color: #2c44b0;
+        }
+
+        /* 响应式调整 */
+        @media (max-width: 480px) {
+            .refresh-container {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+            }
+
+            .refresh-btn {
+                width: 100%;
+                justify-content: flex-end;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>系统信息配置</h1>
+        </header>
+        <form id="wifi-config-form">
+            <div class="manual-input-container" id="manual-input">
+                <div class="form-group">
+                    <label for="manual-wifi-name">Wi-Fi 名称</label>
+                    <input type="text" id="manual-wifi-name" placeholder="输入 Wi-Fi 名称">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="wifi-password">Wi-Fi 密码</label>
+                <input type="text" id="wifi-password" placeholder="输入您的 Wi-Fi 密码">
+            </div>
+			<div class="form-group">
+                <label for="service-url">服务URL(ip:端口)</label>
+                <input type="text" id="service-url" placeholder="输入服务URL地址">
+            </div>
+            <button type="button" id="button-save" class="btn-block">保 存</button>
+        </form>
+        <br/>
+		<br/>
+		<form id="wifi-config-form1">
+            <button type="button" id="button-restart" class="btn-block">重 启</button>
+		</form>
+        <footer>
+            <p>© 2025 配网工具 | <a href="#" class="footer-link">帮助文档</a></p>
+        </footer>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            // 初始化配置信息
+            loadConfigcreds();
+
+            const connBtn = document.getElementById('button-save');
+            connBtn.addEventListener('click', function () {
+                // const selectedNetwork = document.querySelector('.network-item.active');
+                const manualNetwork = document.getElementById('manual-wifi-name').value;
+                const password = document.getElementById('wifi-password').value;
+				const url = document.getElementById('service-url').value;                  
+                const formButton = document.getElementById('button-save');//this.querySelector('button[type="button"]');
+
+                if (!manualNetwork) {
+                    alert('请选择或输入 Wi-Fi 网络');
+                    return;
+                }
+
+                if (!password) {
+                    alert('请输入 Wi-Fi 密码');
+                    return;
+                }
+
+				if (!url) {
+                    //alert('请输入 URL 地址');
+                    alert('请输入 URL 地址');
+                    return;
+                }   
+
+                // 使用AJAX发送WiFi配置
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', '/api/creds_set_config');
+                xhr.setRequestHeader('Content-Type', 'application/json');
+                xhr.onload = function () {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try {
+                            const response = JSON.parse(xhr.responseText);
+                            if (response.success) {
+                                alert('Wi-Fi 连接已成功！');
+                            } else {
+                                alert('Wi-Fi 连接失败: ' + response.message);
+                            }
+                        } catch (e) {
+                            alert('解析服务器响应失败');
+                        }
+                    } else {
+                        alert('服务器错误');
+                    }
+                };
+                xhr.onerror = function () {
+                    alert('网络错误');
+                    return;
+                };
+
+                const data = {
+                    ssid: manualNetwork,
+                    password: password,
+					serviceurl: url
+                };
+
+                xhr.send(JSON.stringify(data));
+            });
+
+            // 加载配置信息
+            function loadConfigcreds() {
+                return new Promise((resolve, reject) => {
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('GET', '/api/creds_get_config');
+                    xhr.setRequestHeader('Content-Type', 'application/json');
+                    xhr.onload = function () {
+                        if (xhr.status >= 200 && xhr.status < 300) {
+                            try {
+                                const data = JSON.parse(xhr.responseText);
+                                updatecredsConfig(data.creds_config);
+                                resolve(data);
+                            } catch (e) {
+                                reject('解析配置信息失败');
+                            }
+                        } else {
+                            reject('获取配置信息失败');
+                        }
+                    };
+                    xhr.onerror = function () {
+                        reject('网络错误');
+                    };
+                    xhr.send();
+                });
+            }
+
+            function updatecredsConfig(credsConfig) {
+                credsConfig.forEach(item => {
+                    document.getElementById('manual-wifi-name').value = item.ssid;
+                    document.getElementById('wifi-password').value = item.password;
+                    document.getElementById('service-url').value = item.url;
+                });
+            }
+
+            const rebootBtn = document.getElementById('button-restart');
+            rebootBtn.addEventListener('click', function () {
+                // 使用AJAX发送Url配置
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', '/api/reboot_post_config');
+                xhr.setRequestHeader('Content-Type', 'application/json');
+                xhr.onload = function () {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try {
+                            const response = JSON.parse(xhr.responseText);
+                            if (response.success) {
+                                alert('重启成功！');
+                            } else {
+                                alert('重启失败: ' + response.message);
+                            }
+                        } catch (e) {
+                            alert('解析服务器响应失败');
+                        }
+                    } else {
+                        alert('服务器错误');
+                    }
+                };
+                xhr.onerror = function () {
+                    alert('网络错误');
+                };
+
+                const data = {
+                    reboot: "reboot"
+                };
+
+                xhr.send(JSON.stringify(data));
+            });
+        });
+    </script>
+</body>
+
+</html>
