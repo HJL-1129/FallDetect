@@ -4,13 +4,54 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>跌倒检测GIS地图</title>
-    <!-- Leaflet CSS (开源免费地图库) -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- Leaflet 多 CDN 兜底加载（unpkg → cdnjs → jsdelivr → bootcdn → staticfile） -->
+    <script>
+        /* Leaflet JS/CSS 多 CDN 兜底加载器：当前 CDN 失败时自动尝试下一个 */
+        (function () {
+            var CSS_URLS = [
+                'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
+                'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css',
+                'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css',
+                'https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.css',
+                'https://cdn.staticfile.org/leaflet/1.9.4/leaflet.min.css'
+            ];
+            var JS_URLS = [
+                'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+                'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js',
+                'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.js',
+                'https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.js',
+                'https://cdn.staticfile.org/leaflet/1.9.4/leaflet.min.js'
+            ];
+            function showLibError() {
+                var b = document.getElementById('lib-error');
+                if (b) b.style.display = 'block';
+            }
+            function loadCss(i) {
+                if (i >= CSS_URLS.length) return;
+                var l = document.createElement('link');
+                l.rel = 'stylesheet';
+                l.href = CSS_URLS[i];
+                l.onerror = function () { loadCss(i + 1); };
+                document.head.appendChild(l);
+            }
+            function loadJs(i) {
+                if (window.L) return;
+                if (i >= JS_URLS.length) { showLibError(); return; }
+                var s = document.createElement('script');
+                s.src = JS_URLS[i];
+                s.onload = function () { if (!window.L) loadJs(i + 1); };
+                s.onerror = function () { loadJs(i + 1); };
+                document.head.appendChild(s);
+            }
+            loadCss(0);
+            loadJs(0);
+            setTimeout(function () { if (!window.L) showLibError(); }, 8000);
+        })();
+    </script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-        
+
         #header {
             background: linear-gradient(135deg, #1a237e, #283593);
             color: white;
@@ -151,13 +192,59 @@
         }
         #info-panel .title { font-weight: 600; color: #333; margin-bottom: 4px; }
         #info-panel .detail { color: #666; font-size: 12px; }
+
+        /* ===== 全屏报警弹窗 ===== */
+        #alert {
+            position: fixed;
+            inset: 0;
+            background: rgba(179,9,9,0.94);
+            z-index: 99999;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+        }
+        #alert.show { display: flex; }
+        #alert .box {
+            background: #fff;
+            border-radius: 14px;
+            padding: 26px 30px;
+            max-width: 380px;
+            width: 92%;
+            color: #333;
+            text-align: center;
+            box-shadow: 0 10px 50px rgba(0,0,0,0.5);
+            animation: alertin .3s;
+        }
+        @keyframes alertin {
+            from { transform: scale(.7); opacity: 0; }
+            to { transform: scale(1); opacity: 1; }
+        }
+        #alert h2 { color: #d32f2f; font-size: 24px; margin-bottom: 4px; }
+        #alert .sub { color: #999; font-size: 12px; margin-bottom: 10px; }
+        #alert table { margin: 8px auto 6px; font-size: 13px; border-collapse: collapse; }
+        #alert td { padding: 5px 8px; text-align: left; border-bottom: 1px solid #f0f0f0; }
+        #alert td:first-child { color: #888; padding-right: 14px; white-space: nowrap; }
+        #alert .warn { font-size: 40px; display: block; margin-bottom: 2px; }
+        #alert .btn {
+            margin-top: 16px;
+            background: #d32f2f;
+            color: #fff;
+            border: none;
+            padding: 11px 32px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background .2s;
+        }
+        #alert .btn:hover { background: #b71c1c; }
     </style>
 </head>
 <body>
     <div id="header">
         <div>
             <h1>🚨 跌倒检测 GIS 地图</h1>
-            <div class="subtitle">WGS84坐标系 · 实时监控</div>
+            <div class="subtitle">WGS84坐标系 · 30秒自动刷新 · 自动报警</div>
         </div>
         <div class="controls">
             <span id="status-indicator">
@@ -165,30 +252,66 @@
                 <span id="status-text">检查连接中...</span>
             </span>
             <span class="badge" id="record-count">0 条记录</span>
-            <button onclick="refreshData()">🔄 刷新</button>
+            <button onclick="askNotify()">🔔 通知</button>
         </div>
     </div>
     <div id="map"></div>
+    <div id="lib-error" style="display:none;background:#b71c1c;color:#fff;text-align:center;padding:8px 12px;font-size:13px;z-index:1001;position:relative;">⚠️ 地图库（Leaflet）加载失败：所有 CDN 均不可达，请检查网络后刷新重试。</div>
     <div id="info-panel">
         <div class="title">📊 数据统计</div>
         <div class="detail" id="stats-detail"></div>
     </div>
     <button id="fullscreen-btn" onclick="toggleFullscreen()">⛶ 全屏</button>
 
+    <!-- 跌倒报警弹窗 -->
+    <div id="alert" role="alertdialog" aria-modal="true">
+        <div class="box">
+            <span class="warn">🚨</span>
+            <h2>跌倒报警！</h2>
+            <div class="sub">检测到跌倒事件，请尽快确认</div>
+            <table>
+                <tr><td>设备号</td><td id="al_dev">-</td></tr>
+                <tr><td>跌倒时间</td><td id="al_time">-</td></tr>
+                <tr><td>坐标(WGS84)</td><td id="al_latlng">-</td></tr>
+                <tr><td>倾斜角</td><td id="al_angle">-</td></tr>
+                <tr><td>加速度</td><td id="al_acc">-</td></tr>
+                <tr><td>状态</td><td><span style="color:#d32f2f;font-weight:600">🚨 跌倒报警</span></td></tr>
+            </table>
+            <button class="btn" onclick="closeAlert()">✔ 确认已处理</button>
+        </div>
+    </div>
+
     <script>
         // ============================ 初始化地图 ============================
-        
+
         const map = L.map('map', {
             center: [39.9042, 116.4074],   // 默认北京
             zoom: 13,
             zoomControl: true
         });
 
-        // 使用OpenStreetMap免费瓦片（无API key要求）
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors',
-            maxZoom: 19
-        }).addTo(map);
+        // 地图瓦片：OpenStreetMap 为主源，瓦片加载失败时自动切换备用源（CARTO / Esri）
+        var TILE_PROVIDERS = [
+            { url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', attr: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors' },
+            { url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', attr: '&copy; OpenStreetMap &copy; CARTO' },
+            { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', attr: 'Esri' }
+        ];
+        let tileLayer = null;
+        let tileFailCount = 0;
+        function loadTiles(i) {
+            if (i >= TILE_PROVIDERS.length) return;
+            if (tileLayer) map.removeLayer(tileLayer);
+            tileLayer = L.tileLayer(TILE_PROVIDERS[i].url, {
+                attribution: TILE_PROVIDERS[i].attr,
+                maxZoom: 19
+            }).addTo(map);
+            tileFailCount = 0;
+            tileLayer.on('tileerror', function () {
+                tileFailCount++;
+                if (tileFailCount > 8) loadTiles(i + 1);
+            });
+        }
+        loadTiles(0);
 
         // ============================ 自定义标记 ============================
 
@@ -200,12 +323,156 @@
 
         const markers = [];  // 保存所有标记
 
+        // ============================ 状态与去重 ============================
+
+        const seen = {};     // 已处理记录去重
+        const markerKeys = {};  // 已画标记的记录 key（增量去重）
+        let viewSet = false;    // 初始视野是否已设置（只 fit 一次）
+        let inited = false;  // 首次加载不报警
+        let AC = null;       // Web Audio 上下文
+        let beepTimer = null;
+
+        // ============================ API 地址 ============================
+
+        // 2026-08-24: 统一为同域 lele1129.top（与 ESP32 上传地址、Worker 路由一致）
+        // 如部署到独立域名/Pages，可改为 'https://lele1129.top'
+        const API_BASE = location.origin || 'https://lele1129.top';
+
+        // ============================ 报警蜂鸣音 ============================
+
+        function playAlarm() {
+            if (beepTimer) return;
+            if (!AC) {
+                try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; }
+            }
+            if (!AC) return;
+            function beep(f1, f2) {
+                if (!AC) return;
+                const o1 = AC.createOscillator(), g1 = AC.createGain();
+                o1.type = 'square'; o1.frequency.value = f1;
+                g1.gain.setValueAtTime(0.18, AC.currentTime);
+                g1.gain.exponentialRampToValueAtTime(0.001, AC.currentTime + 0.22);
+                o1.connect(g1); g1.connect(AC.destination); o1.start(); o1.stop(AC.currentTime + 0.22);
+                const o2 = AC.createOscillator(), g2 = AC.createGain();
+                o2.type = 'square'; o2.frequency.value = f2;
+                g2.gain.setValueAtTime(0.18, AC.currentTime + 0.28);
+                g2.gain.exponentialRampToValueAtTime(0.001, AC.currentTime + 0.5);
+                o2.connect(g2); g2.connect(AC.destination); o2.start(AC.currentTime + 0.28); o2.stop(AC.currentTime + 0.5);
+            }
+            let n = 0;
+            (function loop() {
+                beep(880, 660);
+                n++;
+                if (n < 6 && document.getElementById('alert').classList.contains('show')) {
+                    beepTimer = setTimeout(loop, 700);
+                } else { beepTimer = null; }
+            })();
+        }
+        function stopAlarm() { if (beepTimer) { clearTimeout(beepTimer); beepTimer = null; } }
+
+        // ============================ 全屏报警弹窗 ============================
+
+        function angleStr(a) { a = parseFloat(a); return isNaN(a) ? '-' : (Math.round(a * 10) / 10) + '°'; }
+        function accStr(a) { a = parseFloat(a); return isNaN(a) ? '-' : (Math.round(a * 100) / 100) + 'g'; }
+
+        function showAlert(d) {
+            const lat = parseFloat(d.lat), lng = parseFloat(d.lng);
+            document.getElementById('al_dev').textContent = d.device_id || '未知';
+            document.getElementById('al_time').textContent = d.time || d.timestamp || '未知';
+            document.getElementById('al_latlng').textContent =
+                (isNaN(lat) || isNaN(lng)) ? '-' : lat.toFixed(6) + ', ' + lng.toFixed(6);
+            document.getElementById('al_angle').textContent = (d.angle || d.angle === 0) ? angleStr(d.angle) : '-';
+            document.getElementById('al_acc').textContent = (d.acceleration || d.acceleration === 0) ? accStr(d.acceleration) : '-';
+            document.getElementById('alert').classList.add('show');
+            playAlarm();
+            if ('Notification' in window && Notification.permission === 'granted') {
+                try {
+                    new Notification('🚨 跌倒报警', { body: '设备:' + (d.device_id || '未知') + ' 时间:' + (d.time || d.timestamp || '未知') });
+                } catch (e) { }
+            }
+        }
+        function closeAlert() {
+            document.getElementById('alert').classList.remove('show');
+            stopAlarm();
+        }
+        function askNotify() {
+            if ('Notification' in window && Notification.permission === 'default') {
+                Notification.requestPermission().then(function (p) {
+                    alert(p === 'granted' ? '通知已开启' : '未开启通知权限');
+                });
+            } else if ('Notification' in window && Notification.permission === 'granted') {
+                alert('通知已开启');
+            } else {
+                alert('当前浏览器不支持通知，请使用HTTPS访问');
+            }
+        }
+        function keyFor(d) { return (d.device_id || '') + '|' + (d.time || d.timestamp || '') + '|' + (d.received_at || ''); }
+
+        // ============================ 自动报警（后台轮询） ============================
+
+        // 增量添加标记点：只补画没有的新标记，不删旧标记、不重置视野
+        function addNewMarkers(records) {
+            records.forEach(record => {
+                const k = keyFor(record);
+                if (markerKeys[k]) return;
+                markerKeys[k] = true;
+
+                const lat = parseFloat(record.lat);
+                const lng = parseFloat(record.lng);
+                if (isNaN(lat) || isNaN(lng) || (lat === 0 && lng === 0)) return;
+
+                const marker = L.marker([lat, lng], { icon: fallIcon })
+                    .addTo(map)
+                    .bindPopup(`
+                        <div class="fall-popup">
+                            <h3>跌倒报警</h3>
+                            <table>
+                                <tr><td>设备:</td><td>${record.device_id || '未知'}</td></tr>
+                                <tr><td>时间:</td><td>${record.time || record.timestamp || '未知'}</td></tr>
+                                <tr><td>坐标:</td><td>${lat.toFixed(6)}, ${lng.toFixed(6)}</td></tr>
+                                <tr><td>倾斜角:</td><td>${(record.angle || record.angle === 0) ? angleStr(record.angle) : '-'}</td></tr>
+                                <tr><td>加速度:</td><td>${(record.acceleration || record.acceleration === 0) ? accStr(record.acceleration) : '-'}</td></tr>
+                                <tr><td>状态:</td><td><span class="tag">跌倒报警</span></td></tr>
+                            </table>
+                        </div>
+                    `, { className: 'fall-popup', autoPan: false });
+                markers.push(marker);
+            });
+
+            // 首次有标记时设置一次初始视野，之后永不重置
+            if (!viewSet && markers.length > 0) {
+                if (markers.length === 1) {
+                    map.setView(markers[0].getLatLng(), 15);
+                } else {
+                    map.fitBounds(L.latLngBounds(markers.map(m => m.getLatLng())), { padding: [50, 50] });
+                }
+                viewSet = true;
+            }
+        }
+
+        // 自动报警：后台每 5 秒轮询，检测新跌倒 → 报警 + 增量画标记（不重置视野）
+        async function pollAlarm() {
+            try {
+                const response = await fetch(API_BASE + '/api/fall');
+                if (!response.ok) return;
+                const records = await response.json();
+                const fresh = [];
+                records.forEach(r => {
+                    const k = keyFor(r);
+                    if (!seen[k]) { seen[k] = 1; fresh.push(r); }
+                });
+                addNewMarkers(records);
+                // 首次轮询只去重不报警（等首次加载完成）
+                if (!inited) { inited = true; return; }
+                if (fresh.length > 0) {
+                    showAlert(fresh[fresh.length - 1]);
+                }
+            } catch (e) { /* 轮询失败静默处理，不打扰用户 */ }
+        }
+
         // ============================ 加载数据 ============================
 
-        // ====== 修改这里：API地址指向Cloudflare Worker ======
-        // 部署Worker后，把下面的URL改为你的Worker地址
-        const API_BASE = 'https://api.lele1129.top';
-
+        // 自动刷新数据：页面加载 + 每 30 秒调用，只增量补画标记、更新计数，不重置视野
         async function refreshData() {
             const statusDot = document.getElementById('status-dot');
             const statusText = document.getElementById('status-text');
@@ -217,17 +484,13 @@
 
                 const response = await fetch(API_BASE + '/api/fall');
                 if (!response.ok) throw new Error('HTTP ' + response.status);
-                
+
                 const records = await response.json();
-                
+
                 // 更新状态
                 statusDot.className = 'status-dot online';
                 statusText.textContent = '已连接';
                 recordCount.textContent = records.length + ' 条记录';
-
-                // 清除旧标记
-                markers.forEach(m => map.removeLayer(m));
-                markers.length = 0;
 
                 // 如果没有数据，显示提示
                 if (records.length === 0) {
@@ -236,55 +499,30 @@
                     return;
                 }
 
-                // 添加新标记
-                let bounds = [];
-                records.forEach((record, index) => {
-                    const lat = parseFloat(record.lat);
-                    const lng = parseFloat(record.lng);
-                    
-                    if (isNaN(lat) || isNaN(lng) || (lat === 0 && lng === 0)) return;
-
-                    const marker = L.marker([lat, lng], { icon: fallIcon })
-                        .addTo(map)
-                        .bindPopup(`
-                            <div class="fall-popup">
-                                <h3>跌倒报警</h3>
-                                <table>
-                                    <tr><td>设备:</td><td>${record.device_id || '未知'}</td></tr>
-                                    <tr><td>时间:</td><td>${record.time || '未知'}</td></tr>
-                                    <tr><td>坐标:</td><td>${lat.toFixed(6)}, ${lng.toFixed(6)}</td></tr>
-                                    <tr><td>倾斜角:</td><td>${record.angle ? record.angle.toFixed(1) + '°' : '-'}</td></tr>
-                                    <tr><td>加速度:</td><td>${record.acceleration ? record.acceleration.toFixed(2) + 'g' : '-'}</td></tr>
-                                    <tr><td>状态:</td><td><span class="tag">跌倒报警</span></td></tr>
-                                </table>
-                            </div>
-                        `, { className: 'fall-popup' });
-
-                    markers.push(marker);
-                    bounds.push([lat, lng]);
-
-                    // 最新的一条自动弹出
-                    if (index === records.length - 1) {
-                        marker.openPopup();
-                    }
+                // 找出新增记录
+                const fresh = [];
+                records.forEach(r => {
+                    const k = keyFor(r);
+                    if (!seen[k]) { seen[k] = 1; fresh.push(r); }
                 });
 
-                // 自动调整地图视野
-                if (bounds.length > 0) {
-                    if (bounds.length === 1) {
-                        map.setView(bounds[0], 15);
-                    } else {
-                        map.fitBounds(bounds, { padding: [50, 50] });
-                    }
+                // 增量添加新标记（不删除旧标记、不重置视野）
+                addNewMarkers(records);
+
+                // 跌倒自动报警：首次加载只去重，之后的新记录立即弹窗+响铃
+                if (!inited) {
+                    inited = true;
+                } else if (fresh.length > 0) {
+                    showAlert(fresh[fresh.length - 1]);
                 }
 
                 // 更新统计信息
                 const now = new Date();
                 const lastHour = records.filter(r => {
-                    const t = new Date(r.time);
+                    const t = new Date(r.time || r.timestamp);
                     return (now - t) < 3600000;
                 }).length;
-                document.getElementById('stats-detail').textContent = 
+                document.getElementById('stats-detail').textContent =
                     `总计: ${records.length} 次跌倒 · 最近1小时: ${lastHour} 次`;
 
             } catch (err) {
@@ -307,15 +545,18 @@
             }
         }
 
-        // ============================ 自动刷新 ============================
+        // ============================ 刷新与自动报警 ============================
 
-        // 每30秒自动刷新
-        setInterval(refreshData, 30000);
-
-        // 页面加载时立即加载数据
+        // 页面加载时立即加载一次数据
         window.addEventListener('load', () => {
-            setTimeout(refreshData, 500);
+            setTimeout(refreshData, 300);
         });
+
+        // 自动报警：后台每 5 秒轮询，检测新跌倒 → 报警 + 增量画标记（不重置视野）
+        setInterval(pollAlarm, 5000);
+
+        // 自动刷新：每 30 秒增量刷新标记点（只加新标记，不重置视野）
+        setInterval(refreshData, 30000);
     </script>
 </body>
 </html>

@@ -10,12 +10,27 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 int fall_event_to_json(const fall_event_t *event, char *buf, size_t buf_size)
 {
-    if (!event || !buf || buf_size < 128) {
+    /* 最小缓冲区至少等于 JSON_BUF_SIZE(512) 以保证完整输出 */
+    if (!event || !buf || buf_size < JSON_BUF_SIZE) {
         return -1;
     }
+
+    /*
+     * 最后防线：任何来源的 NaN/Inf 都可能导致 JSON 非法（如 "angle":nan），
+     * 从而使服务器解析失败（HTTP 400）。这里在序列化前统一规约为合法数值。
+     */
+    double angle        = (double)event->angle;
+    double acceleration = (double)event->acceleration;
+    double latitude     = event->latitude;
+    double longitude    = event->longitude;
+    if (!isfinite(angle))        angle        = 0.0;
+    if (!isfinite(acceleration)) acceleration = 0.0;
+    if (!isfinite(latitude))     latitude     = 0.0;
+    if (!isfinite(longitude))    longitude    = 0.0;
 
     int written = snprintf(buf, buf_size,
         "{"
@@ -34,11 +49,11 @@ int fall_event_to_json(const fall_event_t *event, char *buf, size_t buf_size)
         event->device_id,
         event->event,
         event->timestamp,
-        event->latitude,
-        event->longitude,
+        latitude,
+        longitude,
         event->coordinate,
-        (double)event->angle,
-        (double)event->acceleration,
+        angle,
+        acceleration,
         (unsigned int)event->btn,
         (unsigned int)event->state,
         (unsigned int)event->battery_mv

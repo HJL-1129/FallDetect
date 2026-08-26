@@ -302,10 +302,18 @@ static void send_payload(uint8_t btn, uint8_t state, const mpu6500_history_t *hi
         int idx = (hist->head == 0) ? (MPU6500_SAMPLE_HISTORY - 1) : (hist->head - 1);
         float roll  = hist->history[idx].roll;
         float pitch = hist->history[idx].pitch;
-        /* 倾斜角 = arccos(cos(roll)*cos(pitch)) 的度数近似 */
-        float sin_r = sinf(roll * 3.14159f / 180.0f);
-        float sin_p = sinf(pitch * 3.14159f / 180.0f);
-        float total_angle = asinf(sqrtf(sin_r * sin_r + sin_p * sin_p)) * 180.0f / 3.14159f;
+        /* 防御：传感器瞬间异常可能导致非有限值，回退为0避免NaN传播 */
+        if (!isfinite(roll))  roll  = 0.0f;
+        if (!isfinite(pitch)) pitch = 0.0f;
+        /* 倾斜角 = arccos(cos(roll)*cos(pitch))，即设备相对竖直方向的倾角。
+         * 使用 acos 公式而非 asin(sqrt(sin²r+sin²p))：后者的被开方数可达2，
+         * sqrt≈1.414 超出 asinf 定义域 [-1,1]，躺平姿态(roll/pitch≈±90°)时会产生 NaN。 */
+        float cr = cosf(roll * (float)M_PI / 180.0f);
+        float cp = cosf(pitch * (float)M_PI / 180.0f);
+        float dot = cr * cp;
+        /* clamp 到 [-1,1]，防止浮点舍入误差导致 acosf 定义域越界 */
+        dot = fminf(1.0f, fmaxf(-1.0f, dot));
+        float total_angle = acosf(dot) * 180.0f / (float)M_PI;
         fall_evt.angle = total_angle;
         /* 近似加速度(用角度变化率估算) */
         fall_evt.acceleration = total_angle / 30.0f; /* 粗略换算 */
@@ -331,8 +339,9 @@ static void send_payload(uint8_t btn, uint8_t state, const mpu6500_history_t *hi
     if (s_net_mode == NET_WIFI) {
         /* WiFi模式：通过WiFi HTTPS异步上传到 lele1129.top */
         wifi_upload_event_async(&fall_evt, NULL, NULL);
-    } else if (s_net_mode == NET_4G && gsm4g_is_ready()) {
-        /* 4G模式：通过4G模块 HTTP POST 到 lele1129.top */
+    } else if (gsm4g_is_ready()) {
+        /* 4G模式：4G模块就绪时通过其 HTTP POST 到 lele1129.top */
+        /* 注意：不检查 s_net_mode == NET_4G，因为4G可能后期才就绪 */
         char json_buf[JSON_BUF_SIZE];
         int len = fall_event_to_json(&fall_evt, json_buf, sizeof(json_buf));
         if (len > 0) {
@@ -598,7 +607,8 @@ static void wifi_init_softap(void)
     s_net_mode = NET_AP;
 
     esp_netif_create_default_wifi_ap();
-    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &ap_event_handler, NULL);
+    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                        &ap_event_handler, NULL, NULL);
 
     wifi_config_t cfg = {
         .ap = {

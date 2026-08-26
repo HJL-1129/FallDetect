@@ -28,3 +28,5 @@ Thumbs.db
 
 # Server (独立仓库, 单独管理)
 server/.git/
+.wrangler/
+server/.wrangler/

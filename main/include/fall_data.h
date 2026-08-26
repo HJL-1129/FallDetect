@@ -35,8 +35,8 @@ extern "C" {
  *   "device_id":   "fall_device_001",      // 设备编号
  *   "event":       "fall",                  // 事件类型
  *   "timestamp":   "2026-07-10 12:30:00",  // 发生时间
- *   "latitude":    25.033964,              // 纬度 (WGS84)
- *   "longitude":   121.564468,             // 经度 (WGS84)
+ *   "latitude":    39.9042,                // 纬度 (WGS84)
+ *   "longitude":   116.4074,               // 经度 (WGS84)
  *   "coordinate":  "WGS84",                // 坐标系
  *   "angle":       75.0,                   // 倾斜角 (度)
  *   "acceleration": 3.5                    // 加速度 (g)

@@ -185,30 +185,34 @@ static void gsm4g_task(void *arg)
     ESP_LOGI(TAG, "init done, ready=true");
 
     while (true) {
-        if (at_send_capture("AT+QGPSLOC=2", "+QGPSLOC:", line, sizeof(line), 5000) == ESP_OK) {
-            char *p = strchr(line, ':');
-            if (p) {
-                p++;
-                char *tok = strtok(p, ",");
-                int idx = 0;
-                double lat = 0, lon = 0;
-                while (tok) {
-                    while (*tok == ' ') tok++;
-                    if (idx == 1) lat = atof(tok);
-                    else if (idx == 2) lon = atof(tok);
-                    tok = strtok(NULL, ",");
-                    idx++;
-                }
-                if (lat != 0 && lon != 0) {
-                    if (xSemaphoreTake(s_gps_lock, portMAX_DELAY) == pdTRUE) {
-                        s_last_gps.valid = true;
-                        s_last_gps.lat = lat;
-                        s_last_gps.lon = lon;
-                        xSemaphoreGive(s_gps_lock);
+        /* 拿 UART 互斥锁，避免与 gsm4g_http_post_json 并发操作 AT 指令 */
+        if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(3000)) == pdTRUE) {
+            if (at_send_capture("AT+QGPSLOC=2", "+QGPSLOC:", line, sizeof(line), 5000) == ESP_OK) {
+                char *p = strchr(line, ':');
+                if (p) {
+                    p++;
+                    char *tok = strtok(p, ",");
+                    int idx = 0;
+                    double lat = 0, lon = 0;
+                    while (tok) {
+                        while (*tok == ' ') tok++;
+                        if (idx == 1) lat = atof(tok);
+                        else if (idx == 2) lon = atof(tok);
+                        tok = strtok(NULL, ",");
+                        idx++;
                     }
-                    ESP_LOGI(TAG, "GPS: lat=%.6f lon=%.6f", lat, lon);
+                    if (lat != 0 && lon != 0) {
+                        if (xSemaphoreTake(s_gps_lock, portMAX_DELAY) == pdTRUE) {
+                            s_last_gps.valid = true;
+                            s_last_gps.lat = lat;
+                            s_last_gps.lon = lon;
+                            xSemaphoreGive(s_gps_lock);
+                        }
+                        ESP_LOGI(TAG, "GPS: lat=%.6f lon=%.6f", lat, lon);
+                    }
                 }
             }
+            xSemaphoreGive(s_lock);
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
@@ -448,8 +452,18 @@ esp_err_t gsm4g_http_post_json(const char *url, const char *json_body)
             ESP_LOGI(TAG, "<- %s", line);
             if (strstr(line, "+QHTTPPOST:")) {
                 int err = -1, status = 0;
-                if (sscanf(line, "+QHTTPPOST: %d,%d", &err, &status) >= 2 && err == 0 && status >= 200 && status < 300) {
-                    result = ESP_OK;
+                if (sscanf(line, "+QHTTPPOST: %d,%d", &err, &status) >= 2) {
+                    if (err == 0 && status >= 200 && status < 300) {
+                        result = ESP_OK;
+                    } else if (status == 301 || status == 302 || status == 307 || status == 308) {
+                        /* Cloudflare "Always Use HTTPS" 会把 http 请求 301 到 https。
+                         * AT+QHTTP 不支持 HTTPS 也不跟随重定向，HTTP 明文上传必然失败。
+                         * 请在 Cloudflare 控制台关闭 Always Use HTTPS（或对 /api/fall 放行 HTTP）。
+                         * 见 wifi_upload.h 顶部说明。 */
+                        ESP_LOGE(TAG, "HTTP %d -> 4G模块不支持HTTPS/重定向。请关闭Cloudflare 'Always Use HTTPS'后重试", status);
+                    } else {
+                        ESP_LOGE(TAG, "QHTTPPOST err=%d status=%d", err, status);
+                    }
                 }
                 break;
             }

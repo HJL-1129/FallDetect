@@ -10,6 +10,13 @@
  * - 上传失败自动重试3次
  * - 异步上传，不阻塞主循环
  * - 复用FreeRTOS队列机制，与现有 send_task 兼容
+ * 
+ * 修复记录 (2026-07-15):
+ * - 添加互斥锁保护 s_mod.state 并发访问（WiFi事件回调 vs 上传任务）
+ * - 修复事件处理器句柄泄漏（存储 unregister 用的句柄）
+ * - 消除HTTP回退代码重复（提取 http_post_to_url 函数）
+ * - 修复 shutdown 安全（通过队列通知任务自然退出）
+ * - 队列容量从8扩展到16，减少丢事件概率
  */
 
 #include "wifi_upload.h"
@@ -22,6 +29,7 @@
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 #include "esp_event.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -30,12 +38,10 @@
 
 #define TAG "WIFI_UPLOAD"
 
-/* 当HTTPS失败时是否允许自动回退到HTTP */
+/* 当HTTPS失败时是否允许自动回退到HTTP（本地测试建议关闭回退） */
+/* 2026-08-24: 开启回退。Cloudflare 已放行 http://lele1129.top/api/fall（返回200，
+ * 不再301跳转），HTTPS万一还是失败时自动用HTTP补传，保证跌倒数据必达服务器。 */
 #define UPLOAD_HTTP_FALLBACK_ENABLED  true
-
-/* 上传使用的URL（非HTTPS，用于回退） */
-#define UPLOAD_SERVER_URL_HTTP      "http://lele1129.top"
-#define UPLOAD_SERVER_URL_HTTPS     "https://lele1129.top"
 
 /* WiFi事件位 */
 #define WIFI_CONNECTED_BIT  BIT0
@@ -49,6 +55,8 @@ typedef struct {
 } upload_queue_item_t;
 
 /* 模块内部状态 */
+static SemaphoreHandle_t s_mod_lock = NULL;          /* 保护 s_mod.state 互斥 */
+
 static struct {
     bool               initialized;           /* 是否已初始化 */
     EventGroupHandle_t wifi_event_group;       /* WiFi事件组 */
@@ -57,6 +65,9 @@ static struct {
     TaskHandle_t       upload_task_handle;     /* 上传任务句柄 */
     uint32_t           reconnect_interval_ms;  /* 重连间隔(ms) */
     bool               keep_running;           /* 运行标志 */
+    /* 事件处理器句柄，用于 shutdown 时反注册 */
+    esp_event_handler_instance_t wifi_any_id;
+    esp_event_handler_instance_t ip_got_ip_id;
 } s_mod = {
     .initialized          = false,
     .wifi_event_group     = NULL,
@@ -65,7 +76,29 @@ static struct {
     .upload_task_handle   = NULL,
     .reconnect_interval_ms = WIFI_RECONNECT_MS,
     .keep_running         = false,
+    .wifi_any_id          = NULL,
+    .ip_got_ip_id         = NULL,
 };
+
+/* ============================ 内部辅助函数 ============================ */
+
+static wifi_state_t get_wifi_state(void)
+{
+    wifi_state_t st = WIFI_STATE_DISCONNECTED;
+    if (xSemaphoreTake(s_mod_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+        st = s_mod.state;
+        xSemaphoreGive(s_mod_lock);
+    }
+    return st;
+}
+
+static void set_wifi_state(wifi_state_t st)
+{
+    if (xSemaphoreTake(s_mod_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+        s_mod.state = st;
+        xSemaphoreGive(s_mod_lock);
+    }
+}
 
 /* ============================ WiFi事件处理 ============================ */
 
@@ -74,14 +107,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         ESP_LOGW(TAG, "WiFi disconnected");
-        s_mod.state = WIFI_STATE_DISCONNECTED;
+        set_wifi_state(WIFI_STATE_DISCONNECTED);
         if (s_mod.wifi_event_group) {
             xEventGroupSetBits(s_mod.wifi_event_group, WIFI_DISCONNECT_BIT);
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "WiFi connected, IP: " IPSTR, IP2STR(&ev->ip_info.ip));
-        s_mod.state = WIFI_STATE_CONNECTED;
+        set_wifi_state(WIFI_STATE_CONNECTED);
         if (s_mod.wifi_event_group) {
             xEventGroupSetBits(s_mod.wifi_event_group, WIFI_CONNECTED_BIT);
         }
@@ -100,40 +133,36 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 }
 
 /**
- * @brief 执行一次HTTP POST上传
+ * @brief 执行单次HTTP POST上传（可指定URL）
  * 
- * @param json_buf JSON数据字符串
+ * @param url        完整URL字符串
+ * @param json_buf   JSON数据字符串
  * @param status_code 输出HTTP状态码
  * @return true 上传成功, false 上传失败
  */
-static bool http_post_json(const char *json_buf, int *status_code)
+static bool http_post_to_url(const char *url, const char *json_buf, int *status_code)
 {
-    if (!json_buf || !status_code) return false;
-
-    /* 构建完整URL */
-    char url[512];
-    snprintf(url, sizeof(url), "%s%s", UPLOAD_SERVER_URL, UPLOAD_SERVER_PATH);
+    if (!url || !json_buf || !status_code) return false;
 
     esp_http_client_config_t cfg = {
         .url           = url,
         .event_handler = http_event_handler,
-        .timeout_ms    = 10000,                     /* 10秒超时 */
-        .skip_cert_common_name_check = true,        /* 跳过证书CN检查提高兼容性 */
+        .timeout_ms    = 10000,
+        .skip_cert_common_name_check = true,
+        .crt_bundle_attach = esp_crt_bundle_attach,  /* 挂载内置CA证书包（修复HTTPS握手失败） */
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
-        ESP_LOGE(TAG, "Failed to init HTTP client");
+        ESP_LOGE(TAG, "Failed to init HTTP client for %s", url);
         *status_code = 0;
         return false;
     }
 
-    /* 设置POST方法和头 */
     esp_http_client_set_method(client, HTTP_METHOD_POST);
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_post_field(client, json_buf, strlen(json_buf));
 
-    /* 执行请求 */
     esp_err_t err = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
     *status_code = status;
@@ -141,16 +170,23 @@ static bool http_post_json(const char *json_buf, int *status_code)
     bool success = (err == ESP_OK && status >= 200 && status < 300);
 
     if (success) {
-        ESP_LOGI(TAG, "Upload OK, HTTP %d", status);
-        esp_http_client_cleanup(client);
-        return true;
+        ESP_LOGI(TAG, "POST %s OK, HTTP %d", url, status);
+    } else {
+        ESP_LOGW(TAG, "POST %s FAIL: err=%s, HTTP %d", url,
+                 esp_err_to_name(err), status);
     }
 
-    /* HTTPS可能因证书问题失败，记录错误码供诊断 */
-    ESP_LOGW(TAG, "Upload via %s FAIL: err=%s, HTTP %d", url,
-             esp_err_to_name(err), status);
     esp_http_client_cleanup(client);
-    return false;
+    return success;
+}
+
+/**
+ * @brief 执行一次HTTP POST上传（使用配置的URL）
+ */
+static bool http_post_json(const char *json_buf, int *status_code)
+{
+    /* 使用头文件中配置的 UPLOAD_API_URL */
+    return http_post_to_url(UPLOAD_API_URL, json_buf, status_code);
 }
 
 /**
@@ -158,36 +194,95 @@ static bool http_post_json(const char *json_buf, int *status_code)
  */
 static bool do_wifi_reconnect(void)
 {
-    if (s_mod.state == WIFI_STATE_CONNECTING) {
-        /* 已在连接中 */
+    if (get_wifi_state() == WIFI_STATE_CONNECTING) {
         return false;
     }
 
-    s_mod.state = WIFI_STATE_CONNECTING;
+    set_wifi_state(WIFI_STATE_CONNECTING);
 
     esp_err_t err = esp_wifi_connect();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_connect failed: %s", esp_err_to_name(err));
-        s_mod.state = WIFI_STATE_ERROR;
+        set_wifi_state(WIFI_STATE_ERROR);
         return false;
     }
 
-    /* 等待连接成功（最多10秒） */
     EventBits_t bits = xEventGroupWaitBits(
         s_mod.wifi_event_group,
         WIFI_CONNECTED_BIT | WIFI_DISCONNECT_BIT,
-        pdTRUE,    /* 清除位 */
-        pdFALSE,   /* 任意位满足即可 */
+        pdTRUE,
+        pdFALSE,
         pdMS_TO_TICKS(10000)
     );
 
     if (bits & WIFI_CONNECTED_BIT) {
-        s_mod.state = WIFI_STATE_CONNECTED;
+        set_wifi_state(WIFI_STATE_CONNECTED);
         return true;
     }
 
     ESP_LOGW(TAG, "Reconnect timeout");
-    s_mod.state = WIFI_STATE_DISCONNECTED;
+    set_wifi_state(WIFI_STATE_DISCONNECTED);
+    return false;
+}
+
+/* ============================ 上传重试逻辑 ============================ */
+
+/**
+ * @brief 尝试上传，HTTPS优先，失败则HTTP回退
+ * 
+ * @return true 上传成功
+ */
+static bool upload_with_retry(const char *json_buf)
+{
+    int status_code = 0;
+
+    /* 第一次尝试：HTTPS上传 */
+    for (int retry = 0; retry < UPLOAD_MAX_RETRIES; retry++) {
+        if (retry > 0) {
+            ESP_LOGW(TAG, "HTTPS retry %d/%d...", retry + 1, UPLOAD_MAX_RETRIES);
+            vTaskDelay(pdMS_TO_TICKS(1000 * retry));
+        }
+
+        if (http_post_json(json_buf, &status_code)) {
+            return true;
+        }
+
+        if (get_wifi_state() != WIFI_STATE_CONNECTED) {
+            do_wifi_reconnect();
+        }
+    }
+
+    /* HTTPS全部失败 → HTTP回退（只对云端模式有效） */
+    if (!UPLOAD_HTTP_FALLBACK_ENABLED) {
+        return false;
+    }
+
+    ESP_LOGW(TAG, "HTTPS failed, trying HTTP fallback...");
+
+    /* 尝试从HTTPS URL推导HTTP回退URL */
+    char http_url[512];
+    const char *https_url = UPLOAD_API_URL;
+    if (strncmp(https_url, "https://", 8) == 0) {
+        snprintf(http_url, sizeof(http_url), "http://%s", https_url + 8);
+    } else {
+        snprintf(http_url, sizeof(http_url), "%s", https_url);
+    }
+
+    for (int retry = 0; retry < UPLOAD_MAX_RETRIES; retry++) {
+        if (retry > 0) {
+            ESP_LOGW(TAG, "HTTP retry %d/%d...", retry + 1, UPLOAD_MAX_RETRIES);
+            vTaskDelay(pdMS_TO_TICKS(1000 * retry));
+        }
+
+        if (http_post_to_url(http_url, json_buf, &status_code)) {
+            return true;
+        }
+
+        if (get_wifi_state() != WIFI_STATE_CONNECTED) {
+            do_wifi_reconnect();
+        }
+    }
+
     return false;
 }
 
@@ -201,7 +296,6 @@ static void upload_task_func(void *arg)
     ESP_LOGI(TAG, "Upload task started");
 
     while (s_mod.keep_running) {
-        /* 从队列接收上传请求（超时1000ms以便检查keep_running）*/
         BaseType_t received = xQueueReceive(
             s_mod.upload_queue, &item, pdMS_TO_TICKS(1000));
 
@@ -209,12 +303,12 @@ static void upload_task_func(void *arg)
             continue;
         }
 
-        /* 检查WiFi状态，如果断线则等待重连 */
-        while (s_mod.state != WIFI_STATE_CONNECTED && s_mod.keep_running) {
+        /* 检查WiFi状态，断线则等待重连 */
+        while (get_wifi_state() != WIFI_STATE_CONNECTED && s_mod.keep_running) {
             ESP_LOGW(TAG, "WiFi not connected, reconnecting...");
             do_wifi_reconnect();
 
-            if (s_mod.state != WIFI_STATE_CONNECTED) {
+            if (get_wifi_state() != WIFI_STATE_CONNECTED) {
                 vTaskDelay(pdMS_TO_TICKS(s_mod.reconnect_interval_ms));
             }
         }
@@ -236,76 +330,16 @@ static void upload_task_func(void *arg)
 
         ESP_LOGI(TAG, "Uploading: %s", json_buf);
 
-        /* 重试上传 */
-        bool success = false;
-        int status_code = 0;
-
-        /* 第一次尝试：HTTPS上传 */
-        ESP_LOGI(TAG, "Attempting HTTPS upload...");
-        for (int retry = 0; retry < UPLOAD_MAX_RETRIES; retry++) {
-            if (retry > 0) {
-                ESP_LOGW(TAG, "HTTPS retry %d/%d...", retry + 1, UPLOAD_MAX_RETRIES);
-                vTaskDelay(pdMS_TO_TICKS(1000 * retry));
-            }
-
-            success = http_post_json(json_buf, &status_code);
-            if (success) {
-                break;
-            }
-
-            if (s_mod.state != WIFI_STATE_CONNECTED) {
-                do_wifi_reconnect();
-            }
-        }
-
-        /* HTTPS失败时，如果启用HTTP回退，尝试HTTP */
-        if (!success && UPLOAD_HTTP_FALLBACK_ENABLED) {
-            ESP_LOGW(TAG, "HTTPS failed, trying HTTP fallback...");
-            /* 临时修改URL为HTTP并重试 */
-            for (int retry = 0; retry < UPLOAD_MAX_RETRIES; retry++) {
-                if (retry > 0) {
-                    ESP_LOGW(TAG, "HTTP retry %d/%d...", retry + 1, UPLOAD_MAX_RETRIES);
-                    vTaskDelay(pdMS_TO_TICKS(1000 * retry));
-                }
-
-                /* 用HTTP URL上传 */
-                char http_url[512];
-                snprintf(http_url, sizeof(http_url), "%s%s",
-                         UPLOAD_SERVER_URL_HTTP, UPLOAD_SERVER_PATH);
-                /* 复用http_post_json需要临时修改URL，直接构建HTTP请求 */
-                esp_http_client_config_t cfg = {
-                    .url           = http_url,
-                    .event_handler = http_event_handler,
-                    .timeout_ms    = 10000,
-                };
-                esp_http_client_handle_t client = esp_http_client_init(&cfg);
-                if (client) {
-                    esp_http_client_set_method(client, HTTP_METHOD_POST);
-                    esp_http_client_set_header(client, "Content-Type", "application/json");
-                    esp_http_client_set_post_field(client, json_buf, strlen(json_buf));
-                    esp_err_t err = esp_http_client_perform(client);
-                    status_code = esp_http_client_get_status_code(client);
-                    success = (err == ESP_OK && status_code >= 200 && status_code < 300);
-                    ESP_LOGI(TAG, "HTTP fallback result: err=%s status=%d success=%d",
-                             esp_err_to_name(err), status_code, success);
-                    esp_http_client_cleanup(client);
-                    if (success) break;
-                }
-                if (s_mod.state != WIFI_STATE_CONNECTED) {
-                    do_wifi_reconnect();
-                }
-            }
-        }
+        bool success = upload_with_retry(json_buf);
 
         if (success) {
             ESP_LOGI(TAG, "Upload success");
         } else {
-            ESP_LOGE(TAG, "Upload failed after %d retries", UPLOAD_MAX_RETRIES);
+            ESP_LOGE(TAG, "Upload failed after retries");
         }
 
-        /* 回调通知 */
         if (item.callback) {
-            item.callback(success, status_code, item.user_data);
+            item.callback(success, 0, item.user_data);
         }
     }
 
@@ -323,45 +357,57 @@ bool wifi_upload_init(const char *ssid, const char *password)
         return true;
     }
 
-    (void)ssid;    /* WiFi由 main.c 的 wifi_init_sta 建立 */
+    (void)ssid;
     (void)password;
 
-    /* 注册WiFi事件监听 */
+    /* 创建互斥锁 */
+    s_mod_lock = xSemaphoreCreateMutex();
+    if (!s_mod_lock) {
+        ESP_LOGE(TAG, "Failed to create mutex");
+        return false;
+    }
+
+    /* 创建WiFi事件组 */
     s_mod.wifi_event_group = xEventGroupCreate();
     if (!s_mod.wifi_event_group) {
         ESP_LOGE(TAG, "Failed to create event group");
+        vSemaphoreDelete(s_mod_lock);
+        s_mod_lock = NULL;
         return false;
     }
 
     /* 注册事件处理器 */
-    esp_event_handler_instance_t any_id;
-    esp_event_handler_instance_t got_ip;
+    s_mod.wifi_any_id = NULL;
+    s_mod.ip_got_ip_id = NULL;
+
     esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID,
-        &wifi_event_handler, NULL, &any_id);
+        &wifi_event_handler, NULL, &s_mod.wifi_any_id);
     esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP,
-        &wifi_event_handler, NULL, &got_ip);
+        &wifi_event_handler, NULL, &s_mod.ip_got_ip_id);
 
-    /* 创建上传队列（最大8项） */
-    s_mod.upload_queue = xQueueCreate(8, sizeof(upload_queue_item_t));
+    /* 创建上传队列（最大16项） */
+    s_mod.upload_queue = xQueueCreate(16, sizeof(upload_queue_item_t));
     if (!s_mod.upload_queue) {
         ESP_LOGE(TAG, "Failed to create upload queue");
-        esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &any_id);
-        esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &got_ip);
+        esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_mod.wifi_any_id);
+        esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, s_mod.ip_got_ip_id);
         vEventGroupDelete(s_mod.wifi_event_group);
         s_mod.wifi_event_group = NULL;
+        vSemaphoreDelete(s_mod_lock);
+        s_mod_lock = NULL;
         return false;
     }
 
     /* 检查当前WiFi状态 */
     wifi_ap_record_t ap_info;
     if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
-        s_mod.state = WIFI_STATE_CONNECTED;
+        set_wifi_state(WIFI_STATE_CONNECTED);
         ESP_LOGI(TAG, "WiFi already connected to %s", ap_info.ssid);
         xEventGroupSetBits(s_mod.wifi_event_group, WIFI_CONNECTED_BIT);
     } else {
-        s_mod.state = WIFI_STATE_DISCONNECTED;
+        set_wifi_state(WIFI_STATE_DISCONNECTED);
         ESP_LOGW(TAG, "WiFi not connected, will reconnect when needed");
     }
 
@@ -370,20 +416,22 @@ bool wifi_upload_init(const char *ssid, const char *password)
     BaseType_t task_created = xTaskCreate(
         upload_task_func,
         "wifi_upload",
-        4096,       /* 4KB栈 */
+        4096,
         NULL,
-        4,          /* 优先级4 */
+        4,
         &s_mod.upload_task_handle
     );
 
     if (task_created != pdPASS) {
         ESP_LOGE(TAG, "Failed to create upload task");
         vQueueDelete(s_mod.upload_queue);
-        esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &any_id);
-        esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &got_ip);
-        vEventGroupDelete(s_mod.wifi_event_group);
         s_mod.upload_queue = NULL;
+        esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_mod.wifi_any_id);
+        esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, s_mod.ip_got_ip_id);
+        vEventGroupDelete(s_mod.wifi_event_group);
         s_mod.wifi_event_group = NULL;
+        vSemaphoreDelete(s_mod_lock);
+        s_mod_lock = NULL;
         return false;
     }
 
@@ -394,7 +442,7 @@ bool wifi_upload_init(const char *ssid, const char *password)
 
 wifi_state_t wifi_upload_get_state(void)
 {
-    return s_mod.state;
+    return get_wifi_state();
 }
 
 bool wifi_upload_event_async(const fall_event_t *event,
@@ -430,7 +478,6 @@ bool wifi_upload_event_sync(const fall_event_t *event)
 {
     if (!event) return false;
 
-    /* 序列化为JSON */
     char json_buf[JSON_BUF_SIZE];
     int len = fall_event_to_json(event, json_buf, sizeof(json_buf));
     if (len < 0) {
@@ -438,8 +485,7 @@ bool wifi_upload_event_sync(const fall_event_t *event)
         return false;
     }
 
-    /* 确保WiFi已连接 */
-    if (s_mod.state != WIFI_STATE_CONNECTED) {
+    if (get_wifi_state() != WIFI_STATE_CONNECTED) {
         ESP_LOGW(TAG, "WiFi not connected, attempting reconnect...");
         if (!do_wifi_reconnect()) {
             ESP_LOGE(TAG, "Cannot upload: WiFi disconnected");
@@ -447,24 +493,7 @@ bool wifi_upload_event_sync(const fall_event_t *event)
         }
     }
 
-    /* 执行上传（带重试） */
-    int status_code = 0;
-    for (int retry = 0; retry < UPLOAD_MAX_RETRIES; retry++) {
-        if (retry > 0) {
-            ESP_LOGW(TAG, "Sync retry %d/%d...", retry + 1, UPLOAD_MAX_RETRIES);
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
-
-        if (http_post_json(json_buf, &status_code)) {
-            return true;
-        }
-
-        if (s_mod.state != WIFI_STATE_CONNECTED) {
-            do_wifi_reconnect();
-        }
-    }
-
-    return false;
+    return upload_with_retry(json_buf);
 }
 
 bool wifi_upload_has_pending(void)
@@ -475,7 +504,7 @@ bool wifi_upload_has_pending(void)
 
 void wifi_upload_reconnect(void)
 {
-    if (s_mod.state == WIFI_STATE_DISCONNECTED) {
+    if (get_wifi_state() == WIFI_STATE_DISCONNECTED) {
         do_wifi_reconnect();
     }
 }
@@ -487,7 +516,11 @@ void wifi_upload_stop(void)
     s_mod.keep_running = false;
 
     if (s_mod.upload_task_handle) {
-        vTaskDelay(pdMS_TO_TICKS(100));
+        /* 发空事件唤醒任务并退出 */
+        upload_queue_item_t dummy;
+        memset(&dummy, 0, sizeof(dummy));
+        xQueueSend(s_mod.upload_queue, &dummy, pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(200));
         if (s_mod.upload_task_handle) {
             vTaskDelete(s_mod.upload_task_handle);
             s_mod.upload_task_handle = NULL;
@@ -499,12 +532,27 @@ void wifi_upload_stop(void)
         s_mod.upload_queue = NULL;
     }
 
+    /* 反注册事件处理器 */
+    if (s_mod.wifi_any_id) {
+        esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_mod.wifi_any_id);
+        s_mod.wifi_any_id = NULL;
+    }
+    if (s_mod.ip_got_ip_id) {
+        esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, s_mod.ip_got_ip_id);
+        s_mod.ip_got_ip_id = NULL;
+    }
+
     if (s_mod.wifi_event_group) {
         vEventGroupDelete(s_mod.wifi_event_group);
         s_mod.wifi_event_group = NULL;
     }
 
+    if (s_mod_lock) {
+        vSemaphoreDelete(s_mod_lock);
+        s_mod_lock = NULL;
+    }
+
     s_mod.initialized = false;
-    s_mod.state = WIFI_STATE_DISCONNECTED;
+    set_wifi_state(WIFI_STATE_DISCONNECTED);
     ESP_LOGI(TAG, "Stopped");
 }

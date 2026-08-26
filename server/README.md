@@ -29,8 +29,7 @@ ESP32 跌倒检测设备
 
 | 文件 | 用途 |
 |------|------|
-| `worker.js` | Cloudflare Worker 后端 API 代码（接收/查询跌倒数据） |
-| `gis.html` | GIS 地图页面（交互式地图，显示跌倒点） |
+| `worker.js` | Cloudflare Worker 代码（API + 内嵌 GIS 地图页面） |
 | `CLOUDFLARE_SOLUTION.md` | Cloudflare 部署精简版指南 |
 | `README.md` | 本教程文档 |
 
@@ -123,8 +122,8 @@ curl -X POST https://api.lele1129.top/api/fall \
     "device_id":"test_001",
     "event":"fall",
     "timestamp":"2026-07-13 21:00:00",
-    "latitude":25.033964,
-    "longitude":121.564468,
+    "latitude":39.9042,
+    "longitude":116.4074,
     "coordinate":"WGS84",
     "angle":75,
     "acceleration":3.5
@@ -136,57 +135,26 @@ curl https://api.lele1129.top/api/fall
 
 ---
 
-## 第四步：部署 GIS 地图页面
+## 第四步：GIS 地图页面
 
-### 修改 API 地址
+GIS 地图页面已内嵌在 `worker.js` 中，无需单独部署。
 
-打开 `server/gis.html`，找到第 207 行：
-```javascript
-const API_BASE = 'https://fall-api.你的用户名.workers.dev';
-```
+Worker 自动处理以下路由：
 
-改为：
-```javascript
-const API_BASE = 'https://api.lele1129.top';
-```
+| 路由 | 说明 |
+|------|------|
+| `GET /` 或 `GET /index.html` | 返回 GIS 地图页面 |
+| `POST /api/fall` | 接收跌倒事件 |
+| `GET /api/fall` | 查询所有跌倒记录 |
 
-### 方法一：通过 Cloudflare Pages（推荐）
+部署好 Worker 后，直接访问 Worker 域名即可查看 GIS 地图。
 
-1. 登录 https://dash.cloudflare.com
-2. **Workers 和 Pages** → **创建应用程序**
-3. 选择 **Pages** → **直接上传**
-4. 项目名称：`gis-fall-detection`
-5. 把修改后的 `gis.html` **重命名为 `index.html`**
-6. 上传 `index.html` 文件
-7. 点击 **部署**
+如果不希望 GIS 页面与 API 共用同一域名，可以创建第二个 Worker（复制 `worker.js` 代码，只保留 GET / 路由部分），参考以下步骤：
 
-### 添加自定义域名
-
-1. 在 Pages 项目页面 → **自定义域**
-2. 点击 **设置自定义域**
-3. 输入：`gis.lele1129.top`
-4. 点击 **继续** → **激活域**
-
-### 方法二：Nginx 部署（如果自己有服务器）
-
-将 `gis.html` 放到 Nginx 目录 `/var/www/gis/`:
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name gis.lele1129.top;
-
-    ssl_certificate /path/to/cert.pem;
-    ssl_certificate_key /path/to/key.pem;
-
-    root /var/www/gis;
-    index index.html;
-
-    location / {
-        try_files $uri $uri/ =404;
-    }
-}
-```
+1. 在 Cloudflare 控制台再创建一个 Worker（如 `fall-gis`）
+2. 粘贴 `worker.js` 代码
+3. 添加自定义域名：`gis.lele1129.top`
+4. 在第二个 Worker 的 DNS 路由中配置：`gis.lele1129.top/*` → `fall-gis`
 
 ---
 
@@ -234,7 +202,7 @@ idf.py -p COM端口 flash monitor
 │  │         │ ⚠ 跌倒报警    │                │ │
 │  │         │ 设备: fall_001│                │ │
 │  │         │ 时间: 12:30   │                │ │
-│  │         │ 坐标: 25.03   │                │ │
+│  │         │ 坐标: 39.90   │                │ │
 │  │         │ 状态: 跌倒报警 │                │ │
 │  │         └──────────────┘                │ │
 │  │                                         │ │

@@ -1,0 +1,22 @@
+name = "fall-detect-server"
+main = "worker.js"
+compatibility_date = "2026-07-15"
+
+# 自定义域名路由：lele1129.top
+# 2026-08-24: 绑定整个域名（必须用 lele1129.top/* 通配所有路径，否则 /api/fall、/gis 等子路径
+# 不会进入本 Worker，而会落回旧路由/旧服务）
+# 这样无论用户访问根路径还是 /gis、/api/fall，都统一进入 worker.js 由内部路由分发。
+routes = [
+  { pattern = "lele1129.top/*", zone_name = "lele1129.top" }
+]
+
+# KV 持久化存储（跌倒记录）
+[[kv_namespaces]]
+binding = "FALL_KV"
+id = "e876267a350e4f7eb696a5678161d395"
+
+# Uncomment if you bind D1 database:
+# [[d1_databases]]
+# binding = "FALL_DB"
+# database_name = "fall_db"
+# database_id = "your-database-id"

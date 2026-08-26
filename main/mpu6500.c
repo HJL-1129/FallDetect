@@ -135,45 +135,40 @@ static void snapshot_history(mpu6500_history_t *out)
     }
 }
 
-// 摔倒检测状态机：读MPU6500数据，检测是否摔倒
-static void mpu_task(void * arg)
-{
-    // 第1步：定义变量
-    uint8_t raw[14];// 14字节原始数据缓冲区
-    float yaw_int = 0.0f;// 偏航角（Z轴角速度积分累加），初始为0
-    float baseline_roll = 0;// 基准滚转角（空闲态时记录）
-    float baseline_pitch = 0;// 基准俯仰角（空闲态时记录）
-    uint32_t st_enter_ms = 0;// 进入当前状态时的时刻（毫秒）
+static void mpu_task(void * arg){// 摔倒检测状态机：读MPU6500数据，检测是否摔倒
 
-    // 状态：ST_IDLE = 0, ST_FREEFALL = 1, ST_IMPACT_WAIT = 2, ST_POSTURE_CHECK = 3
+    uint8_t raw[14];// 第1步：定义变量
+    float yaw_int = 0.0f;// 14字节原始数据缓冲区
+    float baseline_roll = 0;// 偏航角（Z轴角速度积分累加），初始为0
+    float baseline_pitch = 0;// 基准滚转角（空闲态时记录）
+    uint32_t st_enter_ms = 0;// 基准俯仰角（空闲态时记录）
+    // 进入当前状态时的时刻（毫秒）
     int st = 0;
+    // 枚举结构,状态：ST_IDLE = 0, ST_FREEFALL = 1, ST_IMPACT_WAIT = 2, ST_POSTURE_CHECK = 3
     enum{ST_IDLE = 0, ST_FREEFALL = 1, ST_IMPACT_WAIT = 2, ST_POSTURE_CHECK = 3};
     // 记录当前Tick数，用来做精确延时(last_wake)xtgtc
     TickType_t last_wake = xTaskGetTickCount();
     // 第2步：无限循环，每20毫秒采集一次
     while(true){
-    
-        // ---- 第3步：读取14字节原始数据 ----
-        // 先读数据，把结果存到ret里（ESP_OK=成功，其他=失败,14字节数据）
-        int ret;
-        ret = mpu6500_read(MPU6500_REG_ACCEL_XOUT_H, raw, 14);
 
-            // 如果ret不等于ESP_OK，说明读失败了
-        if (ret != 0) {
-            // 等20毫秒再试
-            vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
-            // 跳过本轮循环，重新开始
+        // 第3步：从0x3B读14字节原始数据
+        // 读失败则等待后重试
+        int ret;
+        ret = mpu6500_read(MPU6500_REG_ACCEL_XOUT_H,raw,14);
+
+        if(ret != 0){
+            vTaskDelayUntil(&last_wake,pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
             continue;
         }
 
         // ---- 第4步：拆解6轴原始数值 ----
-        // 高8位 << 8 | 低8位 → 合并成16位有符号整数（MPU6500输出二进制补码）
-        int16_t ax_r = (int16_t)((raw[0]<<8)|raw[1]);
-        int16_t ay_r = (int16_t)((raw[2]<<8)|raw[3]);
-        int16_t az_r = (int16_t)((raw[4]<<8)|raw[5]);
-        int16_t gx_r = (int16_t)((raw[8]<<8)|raw[9]);
-        int16_t gy_r = (int16_t)((raw[10]<<8)|raw[11]);
-        int16_t gz_r = (int16_t)((raw[12]<<8)|raw[13]);
+        int16_t ax_r = (int16_t)((raw[0] << 8) | raw[1]);// 高8位 << 8 | 低8位 → 合并成16位整数
+        int16_t ay_r = (int16_t)((raw[2] << 8) | raw[3]);// 加速度X
+        int16_t az_r = (int16_t)((raw[4] << 8) | raw[5]);// 加速度Y
+        int16_t gx_r = (int16_t)((raw[8] << 8) | raw[9]);// 加速度Z
+        int16_t gy_r = (int16_t)((raw[10] << 8) | raw[11]);// 陀螺仪X
+        int16_t gz_r = (int16_t)((raw[12] << 8) | raw[13]);// 陀螺仪Y
+        
 
         // ---- 第5步：原始值 ÷ 量程(ACCEL_SCALE_4G;GYRO_SCALE_500;) = 物理单位 ----
         float ax = ax_r / ACCEL_SCALE_4G;
@@ -183,17 +178,16 @@ static void mpu_task(void * arg)
         float gy = gy_r / GYRO_SCALE_500;
         float gz = gz_r / GYRO_SCALE_500;
 
+        // ---- 第6步：计算特征值 ----gyro_mag、svm、roll、pitch
+        float gyro_mag = sqrtf(gx*gx+gy*gy+gz*gz);// 角速度合量（转得多剧烈）
+        float svm = sqrtf(ax*ax+ay*ay+az*az);// 加速度合量（撞得多狠）
+        float roll = atan2f(ay,az)*180.0f / M_PI;// 滚转角 (180/π≈57.3)
+        float pitch = atan2f(-ax,sqrtf(ay*ay+az*az))*180.0f / M_PI;// 俯仰角
 
-        // ---- 第6步：计算特征值 ----gyro_mag、svm、roll、pitch（g²，a²，yz,-x,y²+z²）
-        float gyro_mag = sqrtf(gx * gx + gy * gy + gz * gz);
-        float svm = sqrtf(ax * ax + ay * ay + az * az);
-        float roll  = atan2f(ay, az) * 180.0f / M_PI;        // 滚转角 (180/π≈57.3)
-        float pitch = atan2f(-ax, sqrtf(ay*ay + az*az)) * 180.0f / M_PI;  // 俯仰角
-        // 偏航角 yaw_int gZ轴角速度累加SAMPLE_DT
         // 偏航角 yaw_int gZ轴角速度累加
         yaw_int = yaw_int + gz * SAMPLE_DT;
-        if (yaw_int > 180.0f)   yaw_int = yaw_int - 360.0f;
-        if (yaw_int < -180.0f)  yaw_int = yaw_int + 360.0f;
+        if (yaw_int > 180.0f) yaw_int = yaw_int - 360.0f;
+        if (yaw_int < 180.0f) yaw_int = yaw_int + 360.0f;
 
         // 第7步：保存姿态历史roll, pitch, yaw_int
         push_history(roll,pitch,yaw_int);

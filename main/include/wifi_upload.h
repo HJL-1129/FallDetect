@@ -9,8 +9,9 @@
  * - 网络异常保护（超时控制）
  * - 非阻塞设计（FreeRTOS任务+队列）
  * 
- * ⚠️ 部署到 Cloudflare Workers 后请修改 UPLOAD_SERVER_URL 为你的 Worker 地址
- * 例如: https://fall-api.你的用户名.workers.dev
+ * 两种使用模式切换:
+ *   模式A - 本地测试: 电脑运行 server/server_local.js，ESP32上传到局域网
+ *   模式B - 云端部署: 部署 worker.js 到 Cloudflare Workers
  * 
  * Content-Type: application/json
  */
@@ -29,23 +30,57 @@ extern "C" {
 /* ============================================================
  * 上传服务器配置
  * ============================================================
- * ⚠️ 重要: 部署Cloudflare Worker后，必须修改下面3个宏为你的Worker地址
  * 
- * 示例:
- *   Step 1: 在 Cloudflare 控制台创建 Worker (名称: fall-api)
- *   Step 2: 部署后获得地址如: https://fall-api.xxx.workers.dev
- *   Step 3: 将下面的 URL 改为该地址
+ * 两种使用模式切换（注释/取消注释即可）:
+ * 
+ * 模式A - 本地测试（ESP32 和电脑连同一个 WiFi）:
+ *   1. 在电脑上运行: node server/server_local.js
+ *   2. 取消注释下方的 LOCAL_TEST 配置
+ *   3. 编译烧录 ESP32
+ *   4. 浏览器打开 http://电脑IP:3000 看 GIS 地图
+ * 
+ * 模式B - 云端部署（Cloudflare Workers）:
+ *   1. 注册 Cloudflare 账号
+ *   2. 部署: cd server && wrangler deploy worker.js --name fall-api
+ *   3. 获得地址如: https://fall-api.xxx.workers.dev
+ *   4. 取消注释下方的 CLOUD_DEPLOY 配置并修改 URL
+ * 
+ * ========== ⚠️ 4G 模块上传关键警告 ==========
+ * 
+ * 4G 模块（Quectel AT+QHTTP）只支持 HTTP 明文上传，且【不支持 HTTPS、不跟随重定向】。
+ * 
+ * Cloudflare 默认开启 "Always Use HTTPS"：
+ *   http://lele1129.top/api/fall  →  301  →  https://lele1129.top/api/fall
+ * 
+ * 4G 模块收到 301 后不会继续请求 https，导致上传必然失败（服务器收不到数据，
+ * GIS 地图无坐标）。若你的设备主要走 4G 网络，必须做【二选一】：
+ * 
+ *   方案1（推荐）: 在 Cloudflare 控制台 → SSL/TLS → Edge Certificates →
+ *                 关闭 "Always Use HTTPS"，同时添加一条规则允许 /api/fall 走 HTTP。
+ *   方案2: 4G 模块换用支持 TLS 的 AT 指令（如 EC200 的 AT+QHTTP 不支持，需要
+ *                 改用 AT+QSSL 或换支持 SSL 的模块/固件），成本较高。
+ * 
+ * ESP32 的 WiFi 路径（esp_http_client）支持 HTTPS，不受影响。
  * ============================================================ */
 
-/* 你的 Cloudflare Worker 地址（部署后修改这里！） */
-// 改为 Worker 地址
-#define UPLOAD_SERVER_URL       "https://api.lele1129.top"
+/* ========== 模式选择：二选一取消注释 ========== */
+
+// --- 模式A：本地测试 ---
+// #define UPLOAD_SERVER_URL       "http://192.168.3.31"   // ← 修改为你的电脑局域网IP
+// #define UPLOAD_SERVER_PATH      ":3000/api/fall"         // 本地服务器端口+路径
+// #define UPLOAD_SERVER_PORT      3000
+// #define UPLOAD_API_URL          UPLOAD_SERVER_URL UPLOAD_SERVER_PATH
+
+// --- 模式B：云端部署（Cloudflare Workers） ---
+#define UPLOAD_SERVER_URL       "https://lele1129.top"
 #define UPLOAD_SERVER_PATH      "/api/fall"
 #define UPLOAD_SERVER_PORT      443
+#define UPLOAD_API_URL          UPLOAD_SERVER_URL UPLOAD_SERVER_PATH
 
-/* 完整API URL（自动拼接，一般无需修改） */
-#define LELE1129_API_URL        UPLOAD_SERVER_URL UPLOAD_SERVER_PATH           /* HTTPS（WiFi上传使用） */
-#define LELE1129_API_URL_HTTP   "http://lele1129.top/api/fall"                 /* HTTP备用（4G模块AT指令） */
+/* ============================================================ */
+
+/* HTTP备用（4G模块AT指令可能不支持HTTPS） */
+#define LELE1129_API_URL_HTTP   "http://lele1129.top/api/fall"
 
 /* 重试次数 */
 #define UPLOAD_MAX_RETRIES      3

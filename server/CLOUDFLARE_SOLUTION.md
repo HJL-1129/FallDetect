@@ -185,8 +185,8 @@ curl -X POST https://fall-api.你的子域.workers.dev/api/fall \
     "device_id": "test_001",
     "event": "fall",
     "time": "2026-07-10 15:30:00",
-    "lat": 25.033964,
-    "lng": 121.564468,
+    "lat": 39.9042,
+    "lng": 116.4074,
     "angle": 75,
     "acceleration": 3.5
   }'
@@ -205,7 +205,7 @@ https://fall-api.你的子域.workers.dev/api/fall
 
 因为您用 `lele1129.top` 域名，而且域名托管在 Cloudflare，所以要改 `wifi_upload.h` 中的上传地址为 Worker 地址：
 
-```c
+```
 // 原来: https://lele1129.top/api/fall
 // 改为:
 #define UPLOAD_SERVER_URL       "https://fall-api.你的子域.workers.dev"
