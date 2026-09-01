@@ -7,7 +7,8 @@ compatibility_date = "2026-07-15"
 # 不会进入本 Worker，而会落回旧路由/旧服务）
 # 这样无论用户访问根路径还是 /gis、/api/fall，都统一进入 worker.js 由内部路由分发。
 routes = [
-  { pattern = "lele1129.top/*", zone_name = "lele1129.top" }
+  { pattern = "lele1129.top/*", zone_name = "lele1129.top" },
+  { pattern = "gis.lele1129.top/*", zone_name = "lele1129.top" }
 ]
 
 # KV 持久化存储（跌倒记录）

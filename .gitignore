@@ -30,3 +30,9 @@ Thumbs.db
 server/.git/
 .wrangler/
 server/.wrangler/
+
+# Server 临时/调试文件（不入库）
+fall.json
+server/tail*.log
+server/tail*.err
+server/*.bak

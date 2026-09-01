@@ -1,0 +1,9 @@
+﻿name = "fall-api"
+main = "worker.js"
+compatibility_date = "2026-07-15"
+
+# api.lele1129.top/* 路由已由 fall-api 占用（Cloudflare 侧已存在），
+# 此处不重复声明 route，仅上传最新 worker.js 代码并绑定 KV。
+[[kv_namespaces]]
+binding = "FALL_KV"
+id = "e876267a350e4f7eb696a5678161d395"

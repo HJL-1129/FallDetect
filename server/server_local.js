@@ -142,6 +142,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
 <div class="ctrl">
 <span id="si"><span class="dot off" id="sd"></span><span id="st">检查中...</span></span>
 <span class="badge" id="rc">0条</span>
+<button id="layerBtn" onclick="toggleLayer()">🗺 矢量</button>
 </div>
 </div>
 <div id="map"></div>
@@ -164,10 +165,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
 </div>
 <script>
 var map=L.map('map',{center:[39.9042,116.4074],zoom:13,zoomControl:true});
-var TPS=[{url:'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',a:'&copy; OSM'},{url:'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',a:'&copy; OSM &copy; CARTO'},{url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',a:'Esri'}];
-var TL=null,TFC=0;
-function lt(i){if(i>=TPS.length)return;if(TL)map.removeLayer(TL);TL=L.tileLayer(TPS[i].url,{attribution:TPS[i].a,maxZoom:19}).addTo(map);TFC=0;TL.on('tileerror',function(){TFC++;if(TFC>8)lt(i+1);});}
-lt(0);
+var TPS=[{url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',a:'&copy; Esri'},{url:'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',a:'&copy; OSM'}];
+/* 天地图（Tianditu）瓦片：矢量(vec_w+cva_w) / 卫星(img_w+cia_w)；域名需在天地图控制台白名单添加 lele1129.top 等 */
+var TDT_KEY='d31a485ae08767b84f5f859987cf74bd';var TD_SUB='01234567';
+var TL=null,TFC=0,tdGroup=null,tdMode='vec',tdFail=0;
+function updLayerBtn(){var b=document.getElementById('layerBtn');if(!b)return;b.textContent=(tdMode==='vec')?'🗺 矢量':'🛰 卫星';}
+function loadFallback(i){if(i>=TPS.length)return;if(tdGroup){map.removeLayer(tdGroup);tdGroup=null;}if(TL)map.removeLayer(TL);TL=L.tileLayer(TPS[i].url,{attribution:TPS[i].a,maxZoom:19}).addTo(map);TFC=0;TL.on('tileerror',function(){TFC++;if(TFC>8)loadFallback(i+1);});updLayerBtn();}
+/* 切换天地图图层：只替换瓦片图层，绝不清空跌倒报警标记 */
+function setLayerMode(mode){tdMode=mode;if(TL){map.removeLayer(TL);TL=null;}if(tdGroup){map.removeLayer(tdGroup);tdGroup=null;}var types=(mode==='sat')?['img_w','cia_w']:['vec_w','cva_w'];var ls=types.map(function(t){return L.tileLayer('https://t{s}.tianditu.gov.cn/DataServer?T='+t+'&tk='+TDT_KEY+'&x={x}&y={y}&l={z}',{subdomains:TD_SUB,attribution:'&copy; 天地图',maxZoom:18});});tdGroup=L.layerGroup(ls).addTo(map);tdFail=0;ls.forEach(function(tl){tl.on('tileerror',function(){tdFail++;if(tdFail>8)loadFallback(0);});});updLayerBtn();}
+function toggleLayer(){setLayerMode(tdMode==='vec'?'sat':'vec');}
+setLayerMode('vec');
 var fi=L.divIcon({className:'fi pulse',iconSize:[14,14],iconAnchor:[7,7]});
 var mks=[];
 var seen={},inited=false;   // 已处理记录去重 + 首次加载不报警

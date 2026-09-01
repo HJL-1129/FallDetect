@@ -252,6 +252,7 @@
                 <span id="status-text">检查连接中...</span>
             </span>
             <span class="badge" id="record-count">0 条记录</span>
+            <button id="layer-btn" onclick="toggleLayer()">🗺 矢量</button>
             <button onclick="askNotify()">🔔 通知</button>
         </div>
     </div>
@@ -273,6 +274,7 @@
                 <tr><td>设备号</td><td id="al_dev">-</td></tr>
                 <tr><td>跌倒时间</td><td id="al_time">-</td></tr>
                 <tr><td>坐标(WGS84)</td><td id="al_latlng">-</td></tr>
+                <tr id="al_gps_row" style="display:none"><td style="color:#d32f2f">定位</td><td style="color:#d32f2f" id="al_gps">⚠️ GPS未定位，地图不显示标记</td></tr>
                 <tr><td>倾斜角</td><td id="al_angle">-</td></tr>
                 <tr><td>加速度</td><td id="al_acc">-</td></tr>
                 <tr><td>状态</td><td><span style="color:#d32f2f;font-weight:600">🚨 跌倒报警</span></td></tr>
@@ -290,16 +292,28 @@
             zoomControl: true
         });
 
-        // 地图瓦片：OpenStreetMap 为主源，瓦片加载失败时自动切换备用源（CARTO / Esri）
+        // ============================ 地图瓦片：天地图(主) + Esri/OSM 兜底 ============================
+        // 天地图：矢量(vec_w+cva_w) / 卫星(img_w+cia_w)；域名需在天地图控制台白名单添加 lele1129.top 等
+        const TDT_KEY = 'd31a485ae08767b84f5f859987cf74bd';
+        const TD_SUB = '01234567';   // 天地图子域仅 0-7，Leaflet 默认 abc 会 403
         var TILE_PROVIDERS = [
-            { url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', attr: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors' },
-            { url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', attr: '&copy; OpenStreetMap &copy; CARTO' },
-            { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', attr: 'Esri' }
+            { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', attr: '&copy; Esri' },
+            { url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', attr: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors' }
         ];
-        let tileLayer = null;
+        let tileLayer = null;      // 兜底源(Esri/OSM)当前图层
         let tileFailCount = 0;
+        let tdGroup = null;        // 天地图当前图层组(矢量/卫星)
+        let tdMode = 'vec';        // 'vec' | 'sat'
+        let tdFail = 0;
+
+        function tdUrl(t) {
+            return 'https://t{s}.tianditu.gov.cn/DataServer?T=' + t + '&tk=' + TDT_KEY + '&x={x}&y={y}&l={z}';
+        }
+
+        // 天地图失败时自动切换到兜底源(Esri → OSM)
         function loadTiles(i) {
             if (i >= TILE_PROVIDERS.length) return;
+            if (tdGroup) { map.removeLayer(tdGroup); tdGroup = null; }
             if (tileLayer) map.removeLayer(tileLayer);
             tileLayer = L.tileLayer(TILE_PROVIDERS[i].url, {
                 attribution: TILE_PROVIDERS[i].attr,
@@ -310,8 +324,40 @@
                 tileFailCount++;
                 if (tileFailCount > 8) loadTiles(i + 1);
             });
+            updateLayerBtn();
         }
-        loadTiles(0);
+
+        // 切换天地图图层：只替换瓦片图层，绝不清空跌倒报警标记
+        function setLayerMode(mode) {
+            tdMode = mode;
+            if (tileLayer) { map.removeLayer(tileLayer); tileLayer = null; }   // 退出兜底源
+            if (tdGroup) { map.removeLayer(tdGroup); tdGroup = null; }
+            const types = (mode === 'sat') ? ['img_w', 'cia_w'] : ['vec_w', 'cva_w'];
+            const layers = types.map(t => L.tileLayer(tdUrl(t), {
+                subdomains: TD_SUB,
+                attribution: '&copy; 天地图',
+                maxZoom: 18
+            }));
+            tdGroup = L.layerGroup(layers).addTo(map);
+            tdFail = 0;
+            layers.forEach(tl => {
+                tl.on('tileerror', function () {
+                    tdFail++;
+                    if (tdFail > 8) loadTiles(0);
+                });
+            });
+            updateLayerBtn();
+        }
+
+        function toggleLayer() { setLayerMode(tdMode === 'vec' ? 'sat' : 'vec'); }
+
+        function updateLayerBtn() {
+            const b = document.getElementById('layer-btn');
+            if (!b) return;
+            b.textContent = (tdMode === 'vec') ? '🗺 矢量' : '🛰 卫星';
+        }
+
+        setLayerMode('vec');   // 默认打开天地图矢量图层
 
         // ============================ 自定义标记 ============================
 
@@ -377,10 +423,12 @@
 
         function showAlert(d) {
             const lat = parseFloat(d.lat), lng = parseFloat(d.lng);
+            const okCoord = !(isNaN(lat) || isNaN(lng) || (lat === 0 && lng === 0));
             document.getElementById('al_dev').textContent = d.device_id || '未知';
             document.getElementById('al_time').textContent = d.time || d.timestamp || '未知';
-            document.getElementById('al_latlng').textContent =
-                (isNaN(lat) || isNaN(lng)) ? '-' : lat.toFixed(6) + ', ' + lng.toFixed(6);
+            document.getElementById('al_latlng').textContent = okCoord ? lat.toFixed(6) + ', ' + lng.toFixed(6) : 'GPS未定位';
+            const gr = document.getElementById('al_gps_row');
+            if (gr) gr.style.display = okCoord ? 'none' : '';
             document.getElementById('al_angle').textContent = (d.angle || d.angle === 0) ? angleStr(d.angle) : '-';
             document.getElementById('al_acc').textContent = (d.acceleration || d.acceleration === 0) ? accStr(d.acceleration) : '-';
             document.getElementById('alert').classList.add('show');

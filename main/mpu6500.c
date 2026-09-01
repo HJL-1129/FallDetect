@@ -32,12 +32,12 @@ static const char *TAG = "MPU6500";
 #define SAMPLE_PERIOD_MS  20
 #define SAMPLE_DT         (SAMPLE_PERIOD_MS / 1000.0f)
 
-#define FREEFALL_THRESHOLD_G   0.55f
+#define FREEFALL_THRESHOLD_G   0.60f
 #define IMPACT_THRESHOLD_G     2.6f
-#define POSTURE_TILT_DEG       45.0f
+#define POSTURE_TILT_DEG       30.0f
 #define FREEFALL_WINDOW_MS     500
 #define IMPACT_WINDOW_MS       1000
-#define POSTURE_HOLD_MS        800
+#define POSTURE_HOLD_MS        1500
 #define GYRO_FALL_THRESHOLD_DPS 180.0f
 
 static i2c_master_bus_handle_t s_bus = NULL;
@@ -137,38 +137,38 @@ static void snapshot_history(mpu6500_history_t *out)
 
 static void mpu_task(void * arg){// 摔倒检测状态机：读MPU6500数据，检测是否摔倒
 
-    uint8_t raw[14];// 第1步：定义变量
-    float yaw_int = 0.0f;// 14字节原始数据缓冲区
-    float baseline_roll = 0;// 偏航角（Z轴角速度积分累加），初始为0
-    float baseline_pitch = 0;// 基准滚转角（空闲态时记录）
-    uint32_t st_enter_ms = 0;// 基准俯仰角（空闲态时记录）
-    // 进入当前状态时的时刻（毫秒）
+    // 第1步：定义变量
+    uint8_t raw[14];// 14字节原始数据缓冲区
+    float yaw_int = 0.0f;// 偏航角（Z轴角速度积分累加），初始为0
+    float baseline_roll = 0;// 基准滚转角(baseline_roll)（空闲态时记录）
+    float baseline_pitch = 0;// 基准俯仰角(baseline_pitch)（空闲态时记录）
+    uint32_t st_enter_ms = 0;// 进入当前状态时的时刻st_enter_ms（毫秒）
+    
+    // 定义，枚举结构,状态：ST_IDLE = 0, ST_FREEFALL = 1, ST_IMPACT_WAIT = 2, ST_POSTURE_CHECK = 3
     int st = 0;
-    // 枚举结构,状态：ST_IDLE = 0, ST_FREEFALL = 1, ST_IMPACT_WAIT = 2, ST_POSTURE_CHECK = 3
     enum{ST_IDLE = 0, ST_FREEFALL = 1, ST_IMPACT_WAIT = 2, ST_POSTURE_CHECK = 3};
-    // 记录当前Tick数，用来做精确延时(last_wake)xtgtc
+    
+    // 记录当前TickType_t数，用来做精确延时(last_wake)xtgtc
     TickType_t last_wake = xTaskGetTickCount();
-    // 第2步：无限循环，每20毫秒采集一次
-    while(true){
 
-        // 第3步：从0x3B读14字节原始数据
-        // 读失败则等待后重试
+    // 第2步：无限循环，每20毫秒采集一次ret
+    // 从0x3B      读取     14字节原始数据（27）(14字节raw)
+    // 第3步：读失败则等待后vTDU(&,pTT(SPM))重试
+    while(true){
         int ret;
         ret = mpu6500_read(MPU6500_REG_ACCEL_XOUT_H,raw,14);
-
-        if(ret != 0){
+        if(ret!=0){
             vTaskDelayUntil(&last_wake,pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
             continue;
         }
 
-        // ---- 第4步：拆解6轴原始数值 ----
-        int16_t ax_r = (int16_t)((raw[0] << 8) | raw[1]);// 高8位 << 8 | 低8位 → 合并成16位整数
-        int16_t ay_r = (int16_t)((raw[2] << 8) | raw[3]);// 加速度X
-        int16_t az_r = (int16_t)((raw[4] << 8) | raw[5]);// 加速度Y
-        int16_t gx_r = (int16_t)((raw[8] << 8) | raw[9]);// 加速度Z
-        int16_t gy_r = (int16_t)((raw[10] << 8) | raw[11]);// 陀螺仪X
-        int16_t gz_r = (int16_t)((raw[12] << 8) | raw[13]);// 陀螺仪Y
-        
+        // ---- 第4步：拆解6轴原始数值 (高8位 << 8 | 低8位 → 合并成16位整数) ----
+        int16_t ax_r = (int16_t)((raw[0] << 8) | raw[1]);
+        int16_t ay_r = (int16_t)((raw[2] << 8) | raw[3]);
+        int16_t az_r = (int16_t)((raw[4] << 8) | raw[5]);
+        int16_t gx_r = (int16_t)((raw[6] << 8) | raw[7]);
+        int16_t gy_r = (int16_t)((raw[10] << 8) | raw[11]);
+        int16_t gz_r = (int16_t)((raw[12] << 8) | raw[13]);
 
         // ---- 第5步：原始值 ÷ 量程(ACCEL_SCALE_4G;GYRO_SCALE_500;) = 物理单位 ----
         float ax = ax_r / ACCEL_SCALE_4G;
@@ -178,22 +178,24 @@ static void mpu_task(void * arg){// 摔倒检测状态机：读MPU6500数据，�
         float gy = gy_r / GYRO_SCALE_500;
         float gz = gz_r / GYRO_SCALE_500;
 
-        // ---- 第6步：计算特征值 ----gyro_mag、svm、roll、pitch
-        float gyro_mag = sqrtf(gx*gx+gy*gy+gz*gz);// 角速度合量（转得多剧烈）
-        float svm = sqrtf(ax*ax+ay*ay+az*az);// 加速度合量（撞得多狠）
-        float roll = atan2f(ay,az)*180.0f / M_PI;// 滚转角 (180/π≈57.3)
-        float pitch = atan2f(-ax,sqrtf(ay*ay+az*az))*180.0f / M_PI;// 俯仰角
 
-        // 偏航角 yaw_int gZ轴角速度累加
+        // ---- 第6步：计算特征值 ----gyro_mag、svm、roll、pitch,(算法sqrtf,atan2f)
+        float gyro_mag = sqrt(gx*gx+gy*gy+gz*gz);// 角速度合量（转得多剧烈）
+        float svm = sqrtf(ax*ax+ay*ay+az*az);// 加速度合量（撞得多狠）
+        float roll = atan2f(ay,az)*180.0f/M_PI;// 滚转角 (180/π≈57.3)
+        float pitch = atan2f(-ax,sqrtf(ay*ay+az*az))*180.0f/M_PI;// 俯仰角
+
+        // 偏航角 yaw_int gZ轴角速度*SAMPLE_DT累加,(360)
         yaw_int = yaw_int + gz * SAMPLE_DT;
-        if (yaw_int > 180.0f) yaw_int = yaw_int - 360.0f;
-        if (yaw_int < 180.0f) yaw_int = yaw_int + 360.0f;
+        if(yaw_int > 180.0f) yaw_int = yaw_int - 360.0f;
+        if(yaw_int < 180.0f) yaw_int = yaw_int + 360.0f;
 
         // 第7步：保存姿态历史roll, pitch, yaw_int
         push_history(roll,pitch,yaw_int);
 
-        // 第8步：当前时间（毫秒）
+        // 第8步：当前时间（毫秒）pTTM(xtgtc)
         uint32_t now_ms = pdTICKS_TO_MS(xTaskGetTickCount());
+
         // ---- 第9步：状态机 ----
         switch (st) {
         case ST_IDLE:  // 空闲态

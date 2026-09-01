@@ -18,7 +18,7 @@ ESP32 跌倒检测设备
 ┌─────────────────────────────────────┐
 │  GIS 地图页面 (前端)                │
 │  域名: https://gis.lele1129.top     │
-│  使用 Leaflet + OpenStreetMap       │
+│  使用 Leaflet + 天地图(Tianditu)瓦片│
 │  显示所有跌倒位置标记               │
 └─────────────────────────────────────┘
 ```
@@ -155,6 +155,42 @@ Worker 自动处理以下路由：
 2. 粘贴 `worker.js` 代码
 3. 添加自定义域名：`gis.lele1129.top`
 4. 在第二个 Worker 的 DNS 路由中配置：`gis.lele1129.top/*` → `fall-gis`
+
+---
+
+## 🗺 天地图（Tianditu）地图瓦片
+
+GIS 地图已由 Esri/OpenStreetMap 切换为**天地图**作为主源，支持矢量/卫星一键切换。
+
+### 瓦片源说明
+
+| 图层 | 基础瓦片 | 注记瓦片 |
+|------|---------|---------|
+| 矢量 | `vec_w` | `cva_w`（中文注记） |
+| 卫星 | `img_w` | `cia_w`（中文注记） |
+
+URL 模板：
+```
+https://t{s}.tianditu.gov.cn/DataServer?T=<图层>&tk=<天地图Key>&x={x}&y={y}&l={z}
+```
+
+> ⚠️ 注意：
+> - 必须使用 `l={z}`，Leaflet 默认的 `{z}` 会返回 403。
+> - 子域必须为 `01234567`，Leaflet 默认 `abc` 会返回 403。
+> - `tk` 为本页使用的天地图 Key：`d31a485ae08767b84f5f859987cf74bd`。
+
+### 域名白名单（天地图控制台）
+
+登录 https://console.tianditu.gov.cn → 我的应用 → 修改白名单，添加：
+```
+lele1129.top,www.lele1129.top,gis.lele1129.top,api.lele1129.top,127.0.0.1
+```
+
+> ⚠️ 白名单必须填写**完整域名**（通配符、`https://` 前缀、路径均不支持）。若白名单未添加当前访问域名，天地图将返回 403，页面会自动回退到 Esri → OSM 兜底源。
+
+### 图层切换与标记保留
+
+地图头部有「🗺 矢量 / 🛰 卫星」切换按钮。切换图层仅替换瓦片图层，**不会清空已绘制的跌倒报警标记**。当天地图瓦片加载失败（如白名单未配置）时，会自动切换回 Esri → OSM 兜底源（参考 `worker.js` / `server_local.js` / `gis.html` 中的 `setLayerMode` / `loadFallback` / `loadTiles`）。
 
 ---
 

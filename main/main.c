@@ -78,6 +78,10 @@
 #define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_PSK
 #define MAX_HTTP_OUTPUT_BUFFER 2048
 
+/* 默认 WiFi 凭据：NVS 为空/被清除时兜底，开机自动连接此 AP 并走 HTTPS 上传 */
+#define DEFAULT_WIFI_SSID "SDT_TEST"
+#define DEFAULT_WIFI_PASS "12345678"
+
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
 
@@ -107,7 +111,7 @@ typedef struct {
     char url[128];
 } url_credentials_t;
 
-static wifi_credentials_t wifi_creds = { .ssid = "wifissid", .password = "wifipassword" };
+static wifi_credentials_t wifi_creds = { .ssid = DEFAULT_WIFI_SSID, .password = DEFAULT_WIFI_PASS };
 static url_credentials_t url_creds   = { .url   = "192.168.1.31:8086" };
 
 static EventGroupHandle_t s_wifi_event_group;
@@ -583,6 +587,11 @@ static void wifi_init_sta(void)
     };
     strncpy((char *)wifi_config.sta.ssid,     wifi_creds.ssid,     sizeof(wifi_config.sta.ssid)     - 1);
     strncpy((char *)wifi_config.sta.password, wifi_creds.password, sizeof(wifi_config.sta.password) - 1);
+
+    /* 开放网络（无密码）：authmode 阈值若仍为 WPA2_PSK 会拒连（见 log.txt:30），需放宽到 OPEN */
+    if (strlen((const char *)wifi_config.sta.password) == 0) {
+        wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    }
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));

@@ -58,20 +58,38 @@ async function getRecords() {
     // 2. 尝试 KV 存储（如果有绑定的 KV）
     if (typeof FALL_KV !== 'undefined') {
         try {
-            const list = await FALL_KV.list({ prefix: 'fall_', limit: 200 });
             const records = [];
-            for (const key of list.keys) {
-                const val = await FALL_KV.get(key.name);
-                if (val) records.push(JSON.parse(val));
+            // 2026-09-01 修复：限制单次读取的 KV 子请求数量，避免超过 Free 套餐单请求子请求上限（约 50）
+            // 导致 1102 错误 / 请求挂起。1 次 list + 最多 40 次 get = 41 个子请求，稳低于上限。
+            const MAX_KV_READS = 40;
+            const r = await FALL_KV.list({ prefix: 'fall_', limit: 1000 });
+            const keys = (r && r.keys) ? r.keys : [];
+            // list 按键名字节序升序返回；键名 fall_<epoch时间戳>_<随机>，时间戳越大越新，
+            // 取末尾 MAX_KV_READS 个即为最近记录。
+            const take = keys.slice(-MAX_KV_READS);
+            for (const key of take) {
+                const name = (key && (key.name || key)) ? (key.name || key) : null;
+                if (!name) { continue; }
+                const val = await FALL_KV.get(name);
+                if (!val) { continue; }
+                try {
+                    const rec = JSON.parse(val);
+                    if (rec) { records.push(rec); }
+                } catch (err) {
+                    console.error('KV parse fail for', name, err.message);
+                }
             }
-            records.sort((a, b) => {
-                const ta = a.received_at || a.time || a.timestamp || '';
-                const tb = b.received_at || b.time || b.timestamp || '';
-                return tb.localeCompare(ta);
-            });
-            return records;
+            console.log('KV: total=' + keys.length + ' read=' + take.length + ' parsed=' + records.length);
+            if (records.length > 0) {
+                records.sort((a, b) => {
+                    const ta = a.received_at || a.time || a.timestamp || '';
+                    const tb = b.received_at || b.time || b.timestamp || '';
+                    return tb.localeCompare(ta);
+                });
+                return records;
+            }
         } catch (e) {
-            console.error('KV error:', e.message);
+            console.error('KV read error:', e.message);
         }
     }
 
@@ -214,6 +232,36 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
 .fall-popup .tag{display:inline-block;background:#ffebee;color:#d32f2f;padding:1px 6px;border-radius:3px;font-size:11px;font-weight:500}
 .fi{background:#ff5252;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 8px rgba(255,82,82,.4);width:14px!important;height:14px!important;margin-left:-7px!important;margin-top:-7px!important}
 .fi.pulse{animation:pulse 1.5s infinite}
+
+/* ===== 通知下拉菜单 ===== */
+#header .menu-wrap{position:relative;display:inline-block}
+#header .menu-wrap>button{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.3);padding:5px 14px;border-radius:4px;cursor:pointer;font-size:12px}
+#header .menu-wrap>button:hover{background:rgba(255,255,255,.25)}
+.dropdown{position:absolute;right:0;top:calc(100% + 6px);background:#fff;border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.18);min-width:200px;padding:6px;z-index:1200}
+#header .dropdown button{display:block;width:100%;text-align:left;background:#fff;color:#333;border:none;padding:9px 12px;border-radius:6px;font-size:13px;cursor:pointer}
+#header .dropdown button:hover{background:#f5f5f5}
+.dropdown .sep{height:1px;background:#eee;margin:5px 0}
+#vd{background:#1976d2;cursor:pointer;user-select:none}
+/* ===== 日历浮层 ===== */
+#cal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:20000;display:none;align-items:center;justify-content:center}
+#cal-overlay.show{display:flex}
+.cal-box{background:#fff;border-radius:14px;width:320px;max-width:94%;padding:16px;box-shadow:0 12px 50px rgba(0,0,0,.35)}
+.cal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.cal-head button{background:#f0f0f0;border:none;border-radius:6px;width:32px;height:32px;font-size:18px;cursor:pointer;color:#333;line-height:1}
+.cal-head span{font-size:15px;font-weight:600;color:#333}
+#cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+#cal-grid .dow{text-align:center;font-size:11px;color:#999;padding:4px 0}
+#cal-grid .day{text-align:center;padding:7px 0;border-radius:6px;font-size:13px;cursor:pointer;color:#333}
+#cal-grid .day:hover{background:#e3f2fd}
+#cal-grid .day.dim{color:#ddd}
+#cal-grid .day.sel{background:#1a237e;color:#fff;font-weight:600}
+#cal-grid .day.has{background:#ffebee;color:#d32f2f;font-weight:600}
+#cal-grid .day.today{outline:2px solid #1976d2;outline-offset:-2px}
+.cal-foot{display:flex;justify-content:space-between;margin-top:12px;gap:8px}
+.cal-foot button{border:none;border-radius:6px;padding:8px 14px;font-size:13px;cursor:pointer}
+.cal-foot .st{background:#1a237e;color:#fff;flex:1}
+.cal-foot .cl{background:#eee;color:#333}
+#cal-note{font-size:11px;color:#888;margin-top:8px;text-align:center}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,82,82,.7)}70%{box-shadow:0 0 0 10px rgba(255,82,82,0)}100%{box-shadow:0 0 0 0 rgba(255,82,82,0)}}
 /* ===== 全屏报警弹窗 ===== */
 #alert{position:fixed;inset:0;background:rgba(179,9,9,.94);z-index:99999;display:none;align-items:center;justify-content:center;color:#fff}
@@ -238,13 +286,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
 </div>
 <div class="ctrl">
 <span id="si"><span class="dot off" id="sd"></span><span id="st">检查中...</span></span>
-<span class="badge" id="rc">0条</span>
-<button onclick="askNotify()">&#128276; 通知</button>
+<span class="badge" id="rc">0条</span><span id="vd" class="badge" onclick="openCal()">&#128197; 今天</span>
+<button id="layerBtn" onclick="toggleLayer()">🗺 矢量</button>
+<div class="menu-wrap"><button onclick="toggleMenu()">&#128276; 通知 &#9662;</button><div id="ndd" class="dropdown" style="display:none"><button onclick="askNotify()">&#128276; 开启浏览器通知</button><div class="sep"></div><button onclick="openCal()">&#128197; 历史日历</button></div></div>
 </div>
 </div>
 <div id="map"></div>
 <div id="lib-error" style="display:none;background:#b71c1c;color:#fff;text-align:center;padding:8px 12px;font-size:13px;z-index:1001;position:relative;">⚠️ 地图库（Leaflet）加载失败：所有 CDN 均不可达，请检查网络后刷新重试。</div>
 
+
+<!-- 日历浮层（历史记录按日期查看） -->
+<div id="cal-overlay">
+<div class="cal-box">
+<div class="cal-head"><button onclick="calPrev()">&#8249;</button><span id="cal-title">-</span><button onclick="calNext()">&#8250;</button></div>
+<div id="cal-grid"></div>
+<div class="cal-foot"><button class="st" onclick="showToday()">&#128197; 回到今天</button><button class="cl" onclick="closeCal()">关闭</button></div>
+<div id="cal-note">红色 = 当天有跌倒记录，点击日期查看该天标记</div>
+</div>
+</div>
 <!-- 跌倒报警弹窗 -->
 <div id="alert" role="alertdialog" aria-modal="true">
 <div class="box">
@@ -255,6 +314,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
 <tr><td>设备号</td><td id="al_dev">-</td></tr>
 <tr><td>跌倒时间</td><td id="al_time">-</td></tr>
 <tr><td>坐标(WGS84)</td><td id="al_latlng">-</td></tr>
+<tr id="al_gps_row" style="display:none"><td style="color:#d32f2f">定位</td><td style="color:#d32f2f" id="al_gps">⚠️ GPS未定位，地图不显示标记</td></tr>
 <tr><td>倾斜角</td><td id="al_angle">-</td></tr>
 <tr><td>加速度</td><td id="al_acc">-</td></tr>
 <tr><td>状态</td><td><span style="color:#d32f2f;font-weight:600">&#128680; 跌倒报警</span></td></tr>
@@ -264,17 +324,23 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
 </div>
 
 <script>
-var map=L.map('map',{center:[39.9042,116.4074],zoom:13,zoomControl:true});
-var TPS=[{url:'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',a:'&copy; OSM'},{url:'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',a:'&copy; OSM &copy; CARTO'},{url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',a:'Esri'}];
-var TL=null,TFC=0;
-function lt(i){if(i>=TPS.length)return;if(TL)map.removeLayer(TL);TL=L.tileLayer(TPS[i].url,{attribution:TPS[i].a,maxZoom:19}).addTo(map);TFC=0;TL.on('tileerror',function(){TFC++;if(TFC>8)lt(i+1);});}
-lt(0);
-var fi=L.divIcon({className:'fi pulse',iconSize:[14,14],iconAnchor:[7,7]});
-var mks=[];
-var seen={};        // 已处理记录去重集合
-var inited=false;   // 首次加载不报警
-var AC=null;        // Web Audio 上下文
-var beepTimer=null;
+var map=null;
+var TPS=[{url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',a:'&copy; Esri'},{url:'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',a:'&copy; OSM'}];
+/* 天地图（Tianditu）瓦片：矢量(vec_w+cva_w) / 卫星(img_w+cia_w)；域名需在天地图控制台白名单添加 lele1129.top 等 */
+var TDT_KEY='d31a485ae08767b84f5f859987cf74bd';var TD_SUB='01234567';
+var TL=null,TFC=0,tdGroup=null,tdMode='vec',tdFail=0;
+var fi=null;
+var mks=[],seen={},inited=false,AC=null,beepTimer=null;
+var mkd={},vset=false;
+var curDate=todayStr(),lastData=[],recordDays={},calYm=[0,0];
+function updLayerBtn(){var b=document.getElementById('layerBtn');if(!b)return;b.textContent=(tdMode==='vec')?'🗺 矢量':'🛰 卫星';}
+function loadFallback(i){if(!map)return;if(i>=TPS.length)return;if(tdGroup){map.removeLayer(tdGroup);tdGroup=null;}if(TL)map.removeLayer(TL);TL=L.tileLayer(TPS[i].url,{attribution:TPS[i].a,maxZoom:19}).addTo(map);TFC=0;TL.on('tileerror',function(){TFC++;if(TFC>8)loadFallback(i+1);});updLayerBtn();}
+/* 切换天地图图层：只替换瓦片图层，绝不清空跌倒报警标记 */
+function setLayerMode(mode){if(!map)return;tdMode=mode;if(TL){map.removeLayer(TL);TL=null;}if(tdGroup){map.removeLayer(tdGroup);tdGroup=null;}var types=(mode==='sat')?['img_w','cia_w']:['vec_w','cva_w'];var ls=types.map(function(t){return L.tileLayer('https://t{s}.tianditu.gov.cn/DataServer?T='+t+'&tk='+TDT_KEY+'&x={x}&y={y}&l={z}',{subdomains:TD_SUB,attribution:'&copy; 天地图',maxZoom:18});});tdGroup=L.layerGroup(ls).addTo(map);tdFail=0;ls.forEach(function(tl){tl.on('tileerror',function(){tdFail++;if(tdFail>8)loadFallback(0);});});updLayerBtn();}
+function toggleLayer(){setLayerMode(tdMode==='vec'?'sat':'vec');}
+function initMap(){if(map)return;if(typeof window.L==='undefined')return;map=window.L.map('map',{center:[39.9042,116.4074],zoom:13,zoomControl:true});fi=window.L.divIcon({className:'fi pulse',iconSize:[14,14],iconAnchor:[7,7]});setLayerMode('vec');}
+function start(){window.addEventListener('load',function(){setTimeout(rd,300)});setInterval(pal,5000);setInterval(rd,30000);}
+(function(){var n=0;function waitL(){if(window.L){initMap();start();return;}if(++n>200)return;setTimeout(waitL,60);}waitL();})();
 
 /* ===== 报警蜂鸣音（Web Audio 合成，无需音频文件） ===== */
 function playAlarm(){
@@ -307,16 +373,18 @@ function stopAlarm(){if(beepTimer){clearTimeout(beepTimer);beepTimer=null;}}
 /* ===== 全屏报警弹窗 ===== */
 function showAlert(d){
   var lat=parseFloat(d.lat),lng=parseFloat(d.lng);
+  var okCoord = !(isNaN(lat)||isNaN(lng)||(lat===0&&lng===0));
   document.getElementById('al_dev').textContent=d.device_id||'未知';
-  document.getElementById('al_time').textContent=d.time||d.timestamp||'未知';
-  document.getElementById('al_latlng').textContent=(isNaN(lat)||isNaN(lng))?'-':lat.toFixed(6)+', '+lng.toFixed(6);
+  document.getElementById('al_time').textContent=bjTime(d);
+  document.getElementById('al_latlng').textContent=okCoord?lat.toFixed(6)+', '+lng.toFixed(6):'GPS未定位';
+  var gr=document.getElementById('al_gps_row');if(gr){gr.style.display=okCoord?'none':'';}
   document.getElementById('al_angle').textContent=(d.angle||d.angle===0)?angleStr(d.angle):'-';
   document.getElementById('al_acc').textContent=(d.acceleration||d.acceleration===0)?accStr(d.acceleration):'-';
   document.getElementById('alert').classList.add('show');
   playAlarm();
   // 浏览器通知（若已授权）
   if('Notification'in window&&Notification.permission==='granted'){
-    try{new Notification('&#128680; 跌倒报警',{body:'设备:'+(d.device_id||'未知')+' 时间:'+(d.time||d.timestamp||'未知')});}catch(e){}
+    try{new Notification('&#128680; 跌倒报警',{body:'设备:'+(d.device_id||'未知')+' 时间:'+bjTime(d)});}catch(e){}
   }
 }
 function angleStr(a){a=parseFloat(a);return isNaN(a)?'-':(Math.round(a*10)/10)+'&deg;';}
@@ -339,29 +407,29 @@ function askNotify(){
 function keyFor(d){return (d.device_id||'')+'|'+(d.time||d.timestamp||'')+'|'+(d.received_at||'');}
 
 /* ===== 增量标记：只补画新标记，不删旧标记、不重置视野 ===== */
-var mkd={},vset=false;
-function amk(ds){
+function amk(ds){if(!map||!fi)return;
+  lastData=ds;recordDays={};
   ds.forEach(function(d){
+    var dd=dateOf(d);
+    if(dd)recordDays[dd]=1;
     var k=keyFor(d);
     if(mkd[k])return;
     mkd[k]=1;
+    if(dd!==curDate)return;
     var lat=parseFloat(d.lat),lng=parseFloat(d.lng);
     if(isNaN(lat)||isNaN(lng)||(lat===0&&lng===0))return;
-    var pop='<div class="fall-popup"><h3>&#128680; 跌倒报警</h3><table>'+
-    '<tr><td>设备:</td><td>'+(d.device_id||'未知')+'</td></tr>'+
-    '<tr><td>时间:</td><td>'+(d.time||d.timestamp||'未知')+'</td></tr>'+
-    '<tr><td>坐标:</td><td>'+lat.toFixed(6)+', '+lng.toFixed(6)+'</td></tr>'+
-    '<tr><td>倾斜角:</td><td>'+angleStr(d.angle)+'</td></tr>'+
-    '<tr><td>加速度:</td><td>'+accStr(d.acceleration)+'</td></tr>'+
-    '<tr><td>状态:</td><td><span class="tag">跌倒报警</span></td></tr></table></div>';
+    var pop='<div class="fall-popup"><h3>&#128680; 跌倒报警</h3><table>'
+    +'<tr><td>设备:</td><td>'+(d.device_id||'未知')+'</td></tr>'
+    +'<tr><td>时间:</td><td>'+bjTime(d)+'</td></tr>'
+    +'<tr><td>坐标:</td><td>'+lat.toFixed(6)+', '+lng.toFixed(6)+'</td></tr>'
+    +'<tr><td>倾斜角:</td><td>'+angleStr(d.angle)+'</td></tr>'
+    +'<tr><td>加速度:</td><td>'+accStr(d.acceleration)+'</td></tr>'
+    +'<tr><td>状态:</td><td><span class="tag">跌倒报警</span></td></tr></table></div>';
     var mk=L.marker([lat,lng],{icon:fi}).addTo(map).bindPopup(pop,{autoPan:false});
     mks.push(mk);
   });
-  if(!vset&&mks.length>0){
-    if(mks.length===1)map.setView(mks[0].getLatLng(),15);
-    else map.fitBounds(L.latLngBounds(mks.map(function(m){return m.getLatLng();})),{padding:[50,50]});
-    vset=true;
-  }
+  if(!vset&&mks.length>0){fitAll();vset=true;}
+  updateCount();
 }
 
 /* ===== 自动报警（5 秒轮询：检测新跌倒 → 报警 + 增量画标记，不重置视野） ===== */
@@ -380,7 +448,7 @@ function rd(){
 var sd=document.getElementById('sd'),st=document.getElementById('st'),rc=document.getElementById('rc');
 sd.className='dot off';st.textContent='加载中...';
 fetch('/api/fall').then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(function(ds){
-sd.className='dot on';st.textContent='已连接';rc.textContent=ds.length+'条';
+sd.className='dot on';st.textContent='已连接';
 var fresh=[];
 ds.forEach(function(d){var k=keyFor(d);if(!seen[k]){seen[k]=1;fresh.push(d);}});
 amk(ds);
@@ -388,9 +456,34 @@ if(!inited){inited=true;}
 else if(fresh.length>0){showAlert(fresh[fresh.length-1]);}
 }).catch(function(e){sd.className='dot off';st.textContent='连接失败';console.error(e)});
 }
-window.addEventListener('load',function(){setTimeout(rd,300)});
-setInterval(pal,5000);   // 5 秒报警轮询（报警 + 增量标记）
-setInterval(rd,30000);   // 30 秒自动刷新（只增量刷新标记）
+/* ===== 通知下拉菜单 ===== */
+function toggleMenu(){var n=document.getElementById('ndd');if(n)n.style.display=(n.style.display==='none'?'block':'none');}
+/* ===== 日期工具 ===== */
+function bjPad(n){return ('0'+n).slice(-2);}
+function bjDateTime(ms){var d=new Date(ms+8*3600000);return d.getUTCFullYear()+'-'+bjPad(d.getUTCMonth()+1)+'-'+bjPad(d.getUTCDate())+' '+bjPad(d.getUTCHours())+':'+bjPad(d.getUTCMinutes())+':'+bjPad(d.getUTCSeconds());}
+function bjMs(d){
+  var t=d.time||d.timestamp||'';t=String(t);
+  if(t){var a=t.split(' '),d0=(a[0]||'').split('-'),t0=(a[1]||'00:00:00').split(':');
+    if(d0.length>=3&&d0[0]&&d0[1]&&d0[2]){var y=+d0[0];if(y>=2000&&y<2100)return Date.UTC(y,+d0[1]-1,+d0[2],+t0[0],+t0[1],+t0[2]);}}
+  var r=d.received_at;
+  if(r){var x=new Date(r);if(!isNaN(x.getTime())&&x.getUTCFullYear()>=2000&&x.getUTCFullYear()<2100)return x.getTime();}
+  return 0;
+}
+/* 设备上报 time/timestamp 为 UTC（ESP32 localtime 未设时区），统一转北京时间(UTC+8)显示与分组 */
+function bjTime(d){var ms=bjMs(d);return ms?bjDateTime(ms):(d.time||d.timestamp||'未知');}
+function todayStr(){return bjDateTime(Date.now()).slice(0,10);}
+function dateOf(d){var ms=bjMs(d);return ms?bjDateTime(ms).slice(0,10):'';}
+function fitAll(){if(!map)return;if(mks.length===1){map.setView(mks[0].getLatLng(),15);}else if(mks.length>1){map.fitBounds(L.latLngBounds(mks.map(function(m){return m.getLatLng();})),{padding:[50,50]});}}
+function updateCount(){var n=0;for(var i=0;i<lastData.length;i++){if(dateOf(lastData[i])===curDate)n++;}document.getElementById('rc').textContent=n+'条';var vd=document.getElementById('vd');if(vd)vd.innerHTML='&#128197; '+(curDate===todayStr()?'今天':curDate);}
+function setDate(s){if(!map)return;curDate=s;mks.forEach(function(m){map.removeLayer(m);});mks=[];mkd={};amk(lastData);fitAll();updateCount();}
+function openCal(){if(!calYm[0]){var p=curDate.split('-');calYm=[parseInt(p[0],10),(parseInt(p[1],10)-1)];}document.getElementById('cal-overlay').classList.add('show');buildCal();}
+function closeCal(){document.getElementById('cal-overlay').classList.remove('show');}
+function calPrev(){calYm[1]--;if(calYm[1]<0){calYm[1]=11;calYm[0]--;}buildCal();}
+function calNext(){calYm[1]++;if(calYm[1]>11){calYm[1]=0;calYm[0]++;}buildCal();}
+function calDay(s){setDate(s);closeCal();}
+function showToday(){setDate(todayStr());closeCal();}
+function buildCal(){var y=calYm[0],m=calYm[1];document.getElementById('cal-title').textContent=y+'年'+(m+1)+'月';var td=todayStr();var fd=new Date(y,m,1).getDay();var dim=new Date(y,m+1,0).getDate();var g=document.getElementById('cal-grid');var h='';var dw=['日','一','二','三','四','五','六'];for(var i=0;i<7;i++)h+='<div class="dow">'+dw[i]+'</div>';for(var j=0;j<fd;j++)h+='<div class="day dim"></div>';for(var d=1;d<=dim;d++){var ds=y+'-'+('0'+(m+1)).slice(-2)+'-'+('0'+d).slice(-2);var cl='day';if(recordDays[ds])cl+=' has';if(ds===td)cl+=' today';if(ds===curDate)cl+=' sel';h+='<div class="'+cl+'" data-d="'+ds+'">'+d+'</div>';}g.innerHTML=h;}
+(function(){var g=document.getElementById('cal-grid');if(g)g.addEventListener('click',function(e){var t=e.target;if(t&&t.getAttribute&&t.getAttribute('data-d')){calDay(t.getAttribute('data-d'));}});})();   // 30 秒自动刷新（只增量刷新标记）
 <\/script>
 </body>
 </html>`;
